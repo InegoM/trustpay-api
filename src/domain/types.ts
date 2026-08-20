@@ -28,9 +28,47 @@ export interface Project {
   outstandingValue: number;
   status: "in-progress" | "completed" | "on-hold";
   agreementVersion: string;
-  agreementAcceptedAt: string;
+  agreementStatus: "draft" | "active";
+  agreementTitle?: string;
+  agreementScope?: string;
+  agreementTerms?: string;
+  agreementAcceptedAt?: string;
   authorizedApprover: string;
   milestones: Milestone[];
+}
+
+export interface CreateProjectInput {
+  name: string;
+  code: string;
+  customerName: string;
+  currencyCode: string;
+  agreement: {
+    title: string;
+    scope: string;
+    terms: string;
+  };
+  milestones: Array<{
+    name: string;
+    description?: string | undefined;
+    value: number;
+    acceptanceCriteria: string[];
+  }>;
+}
+
+export interface ProjectInvitation {
+  id: string;
+  projectId: string;
+  email: string;
+  role: "APPROVER";
+  status: "pending" | "accepted" | "expired" | "revoked";
+  invitedBy: string;
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface CreatedProjectInvitation {
+  invitation: ProjectInvitation;
+  token: string;
 }
 
 export type DecisionInput =
@@ -48,6 +86,9 @@ export type DecisionInput =
     };
 
 export type ActivityType =
+  | "project-created"
+  | "customer-invited"
+  | "customer-approver-joined"
   | "agreement-accepted"
   | "milestone-approved"
   | "evidence-submitted"

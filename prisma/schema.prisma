@@ -1,0 +1,527 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum OrganizationType {
+  SME
+  CUSTOMER
+  SUPPLIER
+  BANK_PARTNER
+}
+
+enum RecordStatus {
+  ACTIVE
+  DISABLED
+  ARCHIVED
+}
+
+enum MembershipRole {
+  OWNER
+  ADMIN
+  APPROVER
+  MEMBER
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+enum ProjectStatus {
+  IN_PROGRESS
+  COMPLETED
+  ON_HOLD
+  ARCHIVED
+}
+
+enum ProjectPartyRole {
+  SME
+  CUSTOMER
+  PAYMENT_PARTNER
+}
+
+enum AgreementStatus {
+  DRAFT
+  ACTIVE
+  SUPERSEDED
+}
+
+enum MilestoneStatus {
+  APPROVED
+  AWAITING_DECISION
+  CHANGES_REQUESTED
+  DISPUTED
+  NOT_STARTED
+}
+
+enum DecisionAction {
+  APPROVE
+  REQUEST_CHANGES
+  RAISE_DISPUTE
+}
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+  CLOSED
+}
+
+enum VariationStatus {
+  PROPOSED
+  APPROVED
+  REJECTED
+}
+
+enum ActivityType {
+  PROJECT_CREATED
+  CUSTOMER_INVITED
+  CUSTOMER_APPROVER_JOINED
+  AGREEMENT_ACCEPTED
+  AGREEMENT_SENT
+  EVIDENCE_SUBMITTED
+  MILESTONE_APPROVED
+  CHANGES_REQUESTED
+  DISPUTE_RECORDED
+  DECISION_RECORDED
+  VARIATION_APPROVED
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  READ
+}
+
+model Organization {
+  id                 String                   @id @default(uuid()) @db.Uuid
+  name               String
+  legalName          String?                  @map("legal_name")
+  registrationNumber String?                  @unique @map("registration_number")
+  type               OrganizationType
+  status             RecordStatus             @default(ACTIVE)
+  createdAt          DateTime                 @default(now()) @map("created_at")
+  updatedAt          DateTime                 @updatedAt @map("updated_at")
+  memberships        OrganizationMembership[]
+  invitations        Invitation[]
+  ownedProjects      Project[]                @relation("ProjectOwner")
+  projectParties     ProjectParty[]
+  contractTemplates  ContractTemplate[]
+  agreementAcceptances AgreementAcceptance[]
+  actorEvents        ActivityEvent[]          @relation("ActivityActorOrganization")
+  notifications      Notification[]
+
+  @@map("organizations")
+}
+
+model User {
+  id                       String                   @id @default(uuid()) @db.Uuid
+  email                    String                   @unique
+  displayName              String                   @map("display_name")
+  status                   RecordStatus             @default(ACTIVE)
+  createdAt                DateTime                 @default(now()) @map("created_at")
+  updatedAt                DateTime                 @updatedAt @map("updated_at")
+  memberships              OrganizationMembership[]
+  invitationsSent          Invitation[]             @relation("InvitationSender")
+  projectsCreated          Project[]                @relation("ProjectCreator")
+  authorizedProjectParties ProjectParty[]           @relation("AuthorizedProjectParty")
+  agreementVersionsCreated AgreementVersion[]       @relation("AgreementVersionCreator")
+  agreementAcceptances     AgreementAcceptance[]
+  submissions              MilestoneSubmission[]
+  evidenceUploads          EvidenceItem[]
+  decisions                MilestoneDecision[]
+  disputesResolved         Dispute[]                @relation("DisputeResolver")
+  variationsApproved       Variation[]              @relation("VariationApprover")
+  actorEvents              ActivityEvent[]          @relation("ActivityActorUser")
+  idempotencyKeys          IdempotencyKey[]
+  notifications            Notification[]
+  credential               UserCredential?
+  authSessions             AuthSession[]
+
+  @@map("users")
+}
+
+model UserCredential {
+  userId            String   @id @map("user_id") @db.Uuid
+  passwordHash      String   @map("password_hash")
+  passwordSalt      String   @map("password_salt")
+  passwordUpdatedAt DateTime @default(now()) @map("password_updated_at")
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_credentials")
+}
+
+model AuthSession {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  tokenHash  String    @unique @map("token_hash")
+  expiresAt  DateTime  @map("expires_at")
+  lastSeenAt DateTime  @default(now()) @map("last_seen_at")
+  revokedAt  DateTime? @map("revoked_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([expiresAt, revokedAt])
+  @@map("auth_sessions")
+}
+
+model OrganizationMembership {
+  id             String         @id @default(uuid()) @db.Uuid
+  organizationId String         @map("organization_id") @db.Uuid
+  userId         String         @map("user_id") @db.Uuid
+  role           MembershipRole
+  createdAt      DateTime       @default(now()) @map("created_at")
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user           User           @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("organization_memberships")
+}
+
+model Invitation {
+  id              String           @id @default(uuid()) @db.Uuid
+  organizationId  String           @map("organization_id") @db.Uuid
+  email           String
+  role            MembershipRole
+  tokenHash       String           @unique @map("token_hash")
+  status          InvitationStatus @default(PENDING)
+  invitedByUserId String           @map("invited_by_user_id") @db.Uuid
+  projectId       String?          @map("project_id") @db.Uuid
+  expiresAt       DateTime         @map("expires_at")
+  createdAt       DateTime         @default(now()) @map("created_at")
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  invitedBy       User             @relation("InvitationSender", fields: [invitedByUserId], references: [id], onDelete: Restrict)
+  project         Project?         @relation(fields: [projectId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, email])
+  @@index([projectId, status])
+  @@map("invitations")
+}
+
+model Project {
+  id                   String            @id @default(uuid()) @db.Uuid
+  owningOrganizationId String            @map("owning_organization_id") @db.Uuid
+  code                 String
+  slug                 String            @unique
+  name                 String
+  status               ProjectStatus     @default(IN_PROGRESS)
+  agreedValueMinor     BigInt            @map("agreed_value_minor")
+  approvedValueMinor   BigInt            @default(0) @map("approved_value_minor")
+  currencyCode         String            @map("currency_code") @db.Char(3)
+  createdByUserId      String            @map("created_by_user_id") @db.Uuid
+  archivedAt           DateTime?         @map("archived_at")
+  createdAt            DateTime          @default(now()) @map("created_at")
+  updatedAt            DateTime          @updatedAt @map("updated_at")
+  owningOrganization   Organization      @relation("ProjectOwner", fields: [owningOrganizationId], references: [id], onDelete: Restrict)
+  createdBy            User              @relation("ProjectCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  parties              ProjectParty[]
+  agreementVersions    AgreementVersion[]
+  milestones           Milestone[]
+  variations           Variation[]
+  activityEvents       ActivityEvent[]
+  invitations          Invitation[]
+
+  @@unique([owningOrganizationId, code])
+  @@index([status])
+  @@map("projects")
+}
+
+model ProjectParty {
+  id                       String           @id @default(uuid()) @db.Uuid
+  projectId                String           @map("project_id") @db.Uuid
+  organizationId           String           @map("organization_id") @db.Uuid
+  role                     ProjectPartyRole
+  authorizedApproverUserId String?          @map("authorized_approver_user_id") @db.Uuid
+  project                  Project          @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  organization             Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  authorizedApprover       User?            @relation("AuthorizedProjectParty", fields: [authorizedApproverUserId], references: [id], onDelete: Restrict)
+
+  @@unique([projectId, organizationId, role])
+  @@index([organizationId])
+  @@map("project_parties")
+}
+
+model ContractTemplate {
+  id                  String            @id @default(uuid()) @db.Uuid
+  ownerOrganizationId String            @map("owner_organization_id") @db.Uuid
+  name                String
+  description         String?
+  status              RecordStatus      @default(ACTIVE)
+  createdAt           DateTime          @default(now()) @map("created_at")
+  updatedAt           DateTime          @updatedAt @map("updated_at")
+  ownerOrganization   Organization      @relation(fields: [ownerOrganizationId], references: [id], onDelete: Restrict)
+  versions            TemplateVersion[]
+
+  @@unique([ownerOrganizationId, name])
+  @@map("contract_templates")
+}
+
+model TemplateVersion {
+  id                String             @id @default(uuid()) @db.Uuid
+  templateId        String             @map("template_id") @db.Uuid
+  versionNumber     Int                @map("version_number")
+  content           Json
+  contentHash       String             @map("content_hash")
+  createdAt         DateTime           @default(now()) @map("created_at")
+  template          ContractTemplate   @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  agreementVersions AgreementVersion[]
+
+  @@unique([templateId, versionNumber])
+  @@map("template_versions")
+}
+
+model AgreementVersion {
+  id                String                @id @default(uuid()) @db.Uuid
+  projectId         String                @map("project_id") @db.Uuid
+  templateVersionId String?               @map("template_version_id") @db.Uuid
+  versionNumber     Int                   @map("version_number")
+  status            AgreementStatus       @default(DRAFT)
+  content           Json
+  contentHash       String                @map("content_hash")
+  createdByUserId   String                @map("created_by_user_id") @db.Uuid
+  createdAt         DateTime              @default(now()) @map("created_at")
+  project           Project               @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  templateVersion   TemplateVersion?      @relation(fields: [templateVersionId], references: [id], onDelete: Restrict)
+  createdBy         User                  @relation("AgreementVersionCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  acceptances       AgreementAcceptance[]
+  variations        Variation[]
+
+  @@unique([projectId, versionNumber])
+  @@index([templateVersionId])
+  @@map("agreement_versions")
+}
+
+model AgreementAcceptance {
+  id                 String           @id @default(uuid()) @db.Uuid
+  agreementVersionId String           @map("agreement_version_id") @db.Uuid
+  organizationId     String           @map("organization_id") @db.Uuid
+  acceptedByUserId   String           @map("accepted_by_user_id") @db.Uuid
+  acceptedAt         DateTime         @default(now()) @map("accepted_at")
+  ipAddress          String?          @map("ip_address") @db.Inet
+  userAgent          String?          @map("user_agent")
+  agreementVersion   AgreementVersion @relation(fields: [agreementVersionId], references: [id], onDelete: Restrict)
+  organization       Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  acceptedBy         User             @relation(fields: [acceptedByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([agreementVersionId, organizationId])
+  @@index([acceptedByUserId])
+  @@map("agreement_acceptances")
+}
+
+model Milestone {
+  id                 String                @id @default(uuid()) @db.Uuid
+  projectId          String                @map("project_id") @db.Uuid
+  sequenceNumber     Int                   @map("sequence_number")
+  name               String
+  description        String?
+  valueMinor         BigInt                @map("value_minor")
+  status             MilestoneStatus       @default(NOT_STARTED)
+  responseDeadline   DateTime?             @map("response_deadline")
+  completedAt        DateTime?             @map("completed_at")
+  createdAt          DateTime              @default(now()) @map("created_at")
+  updatedAt          DateTime              @updatedAt @map("updated_at")
+  project            Project               @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  acceptanceCriteria AcceptanceCriterion[]
+  submissions        MilestoneSubmission[]
+  activityEvents     ActivityEvent[]
+
+  @@unique([projectId, sequenceNumber])
+  @@index([projectId, status])
+  @@map("milestones")
+}
+
+model AcceptanceCriterion {
+  id          String    @id @default(uuid()) @db.Uuid
+  milestoneId String    @map("milestone_id") @db.Uuid
+  position    Int
+  description String
+  milestone   Milestone @relation(fields: [milestoneId], references: [id], onDelete: Restrict)
+
+  @@unique([milestoneId, position])
+  @@map("acceptance_criteria")
+}
+
+model MilestoneSubmission {
+  id                String             @id @default(uuid()) @db.Uuid
+  milestoneId       String             @map("milestone_id") @db.Uuid
+  submissionNumber  Int                @map("submission_number")
+  submittedByUserId String             @map("submitted_by_user_id") @db.Uuid
+  notes             String?
+  submittedAt       DateTime           @default(now()) @map("submitted_at")
+  milestone         Milestone          @relation(fields: [milestoneId], references: [id], onDelete: Restrict)
+  submittedBy       User               @relation(fields: [submittedByUserId], references: [id], onDelete: Restrict)
+  evidenceItems     EvidenceItem[]
+  decision          MilestoneDecision?
+
+  @@unique([milestoneId, submissionNumber])
+  @@index([submittedByUserId])
+  @@map("milestone_submissions")
+}
+
+model EvidenceItem {
+  id               String              @id @default(uuid()) @db.Uuid
+  submissionId     String              @map("submission_id") @db.Uuid
+  uploadedByUserId String              @map("uploaded_by_user_id") @db.Uuid
+  storageKey       String              @unique @map("storage_key")
+  originalName     String              @map("original_name")
+  mimeType         String              @map("mime_type")
+  sizeBytes        BigInt              @map("size_bytes")
+  sha256           String
+  description      String?
+  capturedAt       DateTime?           @map("captured_at")
+  uploadedAt       DateTime            @default(now()) @map("uploaded_at")
+  submission       MilestoneSubmission @relation(fields: [submissionId], references: [id], onDelete: Restrict)
+  uploadedBy       User                @relation(fields: [uploadedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([submissionId])
+  @@map("evidence_items")
+}
+
+model MilestoneDecision {
+  id              String              @id @default(uuid()) @db.Uuid
+  submissionId    String              @unique @map("submission_id") @db.Uuid
+  action          DecisionAction
+  decidedByUserId String              @map("decided_by_user_id") @db.Uuid
+  reference       String              @unique
+  decidedAt       DateTime            @default(now()) @map("decided_at")
+  submission      MilestoneSubmission @relation(fields: [submissionId], references: [id], onDelete: Restrict)
+  decidedBy       User                @relation(fields: [decidedByUserId], references: [id], onDelete: Restrict)
+  changeRequest   ChangeRequest?
+  dispute         Dispute?
+
+  @@index([decidedByUserId])
+  @@map("milestone_decisions")
+}
+
+model ChangeRequest {
+  id                String            @id @default(uuid()) @db.Uuid
+  decisionId        String            @unique @map("decision_id") @db.Uuid
+  reason            String
+  comment           String
+  responseDueAt     DateTime          @map("response_due_at")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  decision          MilestoneDecision @relation(fields: [decisionId], references: [id], onDelete: Restrict)
+
+  @@map("change_requests")
+}
+
+model Dispute {
+  id               String            @id @default(uuid()) @db.Uuid
+  decisionId       String            @unique @map("decision_id") @db.Uuid
+  reason           String
+  explanation      String
+  status           DisputeStatus     @default(OPEN)
+  resolution       String?
+  resolvedByUserId String?           @map("resolved_by_user_id") @db.Uuid
+  resolvedAt       DateTime?         @map("resolved_at")
+  createdAt        DateTime          @default(now()) @map("created_at")
+  updatedAt        DateTime          @updatedAt @map("updated_at")
+  decision         MilestoneDecision @relation(fields: [decisionId], references: [id], onDelete: Restrict)
+  resolvedBy       User?             @relation("DisputeResolver", fields: [resolvedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([status])
+  @@map("disputes")
+}
+
+model Variation {
+  id                 String            @id @default(uuid()) @db.Uuid
+  projectId          String            @map("project_id") @db.Uuid
+  agreementVersionId String?           @map("agreement_version_id") @db.Uuid
+  variationNumber    Int               @map("variation_number")
+  description        String
+  valueChangeMinor   BigInt            @default(0) @map("value_change_minor")
+  status             VariationStatus   @default(PROPOSED)
+  approvedByUserId   String?           @map("approved_by_user_id") @db.Uuid
+  approvedAt         DateTime?         @map("approved_at")
+  createdAt          DateTime          @default(now()) @map("created_at")
+  project            Project           @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  agreementVersion   AgreementVersion? @relation(fields: [agreementVersionId], references: [id], onDelete: Restrict)
+  approvedBy         User?             @relation("VariationApprover", fields: [approvedByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([projectId, variationNumber])
+  @@map("variations")
+}
+
+model ActivityEvent {
+  id                  String        @id @default(uuid()) @db.Uuid
+  projectId           String        @map("project_id") @db.Uuid
+  milestoneId         String?       @map("milestone_id") @db.Uuid
+  actorUserId          String?       @map("actor_user_id") @db.Uuid
+  actorOrganizationId  String?       @map("actor_organization_id") @db.Uuid
+  actorName            String        @map("actor_name")
+  actorType            String        @map("actor_type")
+  type                 ActivityType
+  description          String
+  reference            String?
+  payload              Json?
+  occurredAt           DateTime      @default(now()) @map("occurred_at")
+  project              Project       @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  milestone            Milestone?    @relation(fields: [milestoneId], references: [id], onDelete: Restrict)
+  actorUser             User?         @relation("ActivityActorUser", fields: [actorUserId], references: [id], onDelete: Restrict)
+  actorOrganization     Organization? @relation("ActivityActorOrganization", fields: [actorOrganizationId], references: [id], onDelete: Restrict)
+
+  @@index([projectId, occurredAt])
+  @@index([milestoneId])
+  @@index([reference])
+  @@map("activity_events")
+}
+
+model IdempotencyKey {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String?  @map("user_id") @db.Uuid
+  scope          String
+  key            String
+  requestHash    String   @map("request_hash")
+  responseStatus Int?     @map("response_status")
+  responseBody   Json?    @map("response_body")
+  createdAt      DateTime @default(now()) @map("created_at")
+  expiresAt      DateTime @map("expires_at")
+  user           User?    @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([scope, key])
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
+
+model OutboxEvent {
+  id            String    @id @default(uuid()) @db.Uuid
+  aggregateType String    @map("aggregate_type")
+  aggregateId   String    @map("aggregate_id")
+  eventType     String    @map("event_type")
+  payload       Json
+  attempts      Int       @default(0)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  publishedAt   DateTime? @map("published_at")
+
+  @@index([publishedAt, createdAt])
+  @@map("outbox_events")
+}
+
+model Notification {
+  id             String             @id @default(uuid()) @db.Uuid
+  organizationId String?            @map("organization_id") @db.Uuid
+  userId         String?            @map("user_id") @db.Uuid
+  channel        String
+  subject        String
+  body           String
+  status         NotificationStatus @default(PENDING)
+  attempts       Int                @default(0)
+  sentAt         DateTime?          @map("sent_at")
+  readAt         DateTime?          @map("read_at")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  organization   Organization?      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user           User?              @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
+  @@map("notifications")
+}
