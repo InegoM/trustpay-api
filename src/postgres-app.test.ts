@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import createApp from "./app.js";
 import { createPrismaClient } from "./database/prisma.js";

@@ -84,3 +84,12 @@ These are recorded, not fixed in M00, because they belong to later milestones:
 7. Do not send email, upload evidence, move money, claim external verification, or exercise M01+ flows.
 
 The user-visible result must only claim actions confirmed by the API. A generated invitation token is a local manual-sharing value; no email delivery is connected.
+
+## Local verification evidence — 2026-08-26
+
+- Both PostgreSQL services became healthy on their separate ports and volumes.
+- All five migrations applied successfully to the isolated `trustpay_test` database.
+- The isolated test seed completed against `trustpay_test`; the seed wrapper rejects any URL whose database name does not begin with `trustpay_test`.
+- `npm run test:db` executed all five PostgreSQL persistence tests with no skips and all passed.
+- The built API and Vite web app started on ports 3001 and 8443. Health and web requests returned `200`; Nadia and Omar each authenticated and received only their server-authorized project lists; logout returned `204`.
+- Unrelated-organization denial remains covered by the API authorization test using two unrelated organizations.
