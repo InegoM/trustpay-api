@@ -44,8 +44,6 @@ jobs:
       - run: npm test
       - run: npm run test:db
       - run: npm run build
-      - name: Production dependency audit
-        run: npm audit --omit=dev --audit-level=high
       - name: Full dependency audit (review baseline findings)
         run: npm audit --audit-level=high
         continue-on-error: true
@@ -53,3 +51,5 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
