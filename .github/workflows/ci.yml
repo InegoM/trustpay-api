@@ -30,10 +30,10 @@ jobs:
       DATABASE_URL: postgresql://trustpay:trustpay_dev@127.0.0.1:5432/trustpay_test?schema=public
       TEST_DATABASE_URL: postgresql://trustpay:trustpay_dev@127.0.0.1:5432/trustpay_test?schema=public
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22.14.0
           cache: npm
@@ -48,7 +48,7 @@ jobs:
         run: npm audit --audit-level=high
         continue-on-error: true
       - name: Secret scan
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Production dependency audit
