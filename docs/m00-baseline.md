@@ -1,7 +1,7 @@
 # M00 baseline and security evidence
 
-**Recorded:** 2026-08-26  
-**Repositories:** `InegoM/trustpay-api`, `InegoM/trustpay-web`  
+**Recorded:** 2026-08-26
+**Repositories:** `InegoM/trustpay-api`, `InegoM/trustpay-web`
 **Scope:** reproducible baseline and executable smoke-test preparation only. No M01+ product capability is introduced here.
 
 ## Architecture and trust boundaries
