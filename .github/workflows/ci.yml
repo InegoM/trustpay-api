@@ -1,0 +1,52 @@
+name: API CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, "codex/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18.3-alpine
+        env:
+          POSTGRES_DB: trustpay_test
+          POSTGRES_USER: trustpay
+          POSTGRES_PASSWORD: trustpay_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trustpay -d trustpay_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://trustpay:trustpay_dev@127.0.0.1:5432/trustpay_test?schema=public
+      TEST_DATABASE_URL: postgresql://trustpay:trustpay_dev@127.0.0.1:5432/trustpay_test?schema=public
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - run: npm ci
+      - run: npm run db:deploy
+      - run: npm run db:seed
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:db
+      - run: npm run build
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
+      - name: Full dependency audit (review baseline findings)
+        run: npm audit --audit-level=high
+        continue-on-error: true
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

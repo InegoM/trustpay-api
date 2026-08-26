@@ -133,6 +133,21 @@ describe("TrustPay API", () => {
     expect((await app.inject({ method: "GET", url: "/api/v1/me", headers: { cookie } })).statusCode).toBe(401);
   });
 
+  it("returns a server-managed session only through an HttpOnly cookie", async () => {
+    const app = await testApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      payload: { email: "nadia@example.test", password: "TrustPayDemo!2026" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).not.toHaveProperty("token");
+    expect(response.headers["set-cookie"]).toContain("trustpay_session=");
+    expect(response.headers["set-cookie"]).toContain("HttpOnly");
+    expect(response.headers["set-cookie"]).toContain("SameSite=Lax");
+  });
+
   it("blocks an SME user from making the customer's decision", async () => {
     const app = await testApp();
     const cookie = await login(app, "nadia@example.test");
