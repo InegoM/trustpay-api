@@ -44,9 +44,8 @@ jobs:
       - run: npm test
       - run: npm run test:db
       - run: npm run build
-      - name: Full dependency audit (review baseline findings)
+      - name: Full dependency audit
         run: npm audit --audit-level=high
-        continue-on-error: true
       - name: Secret scan
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
