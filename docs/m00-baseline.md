@@ -56,11 +56,11 @@ Owner for this baseline is **InegoM, repository owner**. Before pilot release, M
 | OPS-002 | Implemented for M00 | Seed/test identities are synthetic `.test` fixtures; setup documentation prohibits real customer data. | 2026-08-26 | Manual review required before any new fixture or provider integration. |
 | SDLC-001 | Partially implemented | Both repositories contain PR CI workflows and work occurs on traceable `codex/m00-baseline` branches. | 2026-08-26 | Branch protection is a repository-setting requirement and must be enabled by the repository owner. |
 | SDLC-002 | Implemented for M00 | `package-lock.json` and `pnpm-lock.yaml` are committed; CI uses `npm ci` and `pnpm install --frozen-lockfile`. | 2026-08-26 | Keep lockfiles updated only through reviewed changes. |
-| SDLC-003 | Partially implemented | Dependabot configuration and CI dependency/secret scans are committed. | 2026-08-26 | Repository owner must enable GitHub dependency alerts and secret scanning, then review alerts before release. |
+| SDLC-003 | Implemented with compensating secret scan | Dependabot alerts and security updates are enabled; CI dependency audits and Gitleaks are blocking. | 2026-08-27 | Native GitHub secret scanning is unavailable for these private user-owned repositories; retain blocking Gitleaks unless repository ownership/plan changes. |
 
 ## Dependency scan result
 
-`npm audit --omit=dev --audit-level=high` and the full `npm audit --audit-level=high` each report three high findings through Prisma's `@prisma/config` dependency on `deepmerge-ts`. The audit tool proposes a forced downgrade to Prisma 6.12.0, which is incompatible with this Prisma 7 baseline and has not been applied. The finding is documented as an M00 residual risk and must be reassessed before pilot under SDLC-005/M10. CI records the full audit for review and blocks on the production audit command.
+The Prisma CLI's `@prisma/config` package pins vulnerable `deepmerge-ts` 7.1.5. Until Prisma publishes a compatible patched dependency, the root lockfile overrides it to patched `deepmerge-ts` 8.0.2. Prisma generation, all migrations, isolated test seeding, all 20 tests, type-checking, and the production build pass with the override. Both `npm audit --omit=dev --audit-level=high` and the full `npm audit --audit-level=high` report zero vulnerabilities and are blocking CI gates. Remove the override after Prisma adopts `deepmerge-ts` 8 or later and the same verification passes.
 
 ## Known specification-to-code discrepancies
 

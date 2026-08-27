@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "packageManager": "npm@10.9.2",
+  "overrides": {
+    "deepmerge-ts": "8.0.2"
+  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "prisma generate && tsc -p tsconfig.json",
