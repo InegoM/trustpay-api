@@ -122,7 +122,8 @@ function mapProject(row: ProjectRow): Project {
     milestones: row.milestones.map((milestone): Milestone => {
       const submission = milestone.submissions[0];
       return {
-        id: milestone.sequenceNumber,
+        id: milestone.id,
+        sequenceNumber: milestone.sequenceNumber,
         name: milestone.name,
         value: money(milestone.valueMinor),
         status: milestoneStatus(milestone.status),
@@ -165,7 +166,12 @@ function mapActivity(row: ActivityRow, projectSlug: string): ActivityEvent {
   return {
     id: row.id,
     projectId: projectSlug,
-    ...(row.milestone ? { milestoneId: row.milestone.sequenceNumber } : {}),
+    ...(row.milestone
+      ? {
+          milestoneId: row.milestone.id,
+          milestoneSequenceNumber: row.milestone.sequenceNumber,
+        }
+      : {}),
     actor: row.actorName,
     actorType:
       row.actorType === "customer"
@@ -524,7 +530,7 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
 
   async recordDecision(
     projectId: string,
-    milestoneId: number,
+    milestoneId: string,
     decision: DecisionInput,
     userId: string,
   ): Promise<DecisionResult> {
@@ -535,7 +541,7 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
           include: {
             parties: { include: { authorizedApprover: true } },
             milestones: {
-              where: { sequenceNumber: milestoneId },
+              where: { id: milestoneId },
               include: {
                 submissions: {
                   orderBy: { submissionNumber: "desc" },
@@ -691,7 +697,8 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
             eventType,
             payload: {
               projectId: project.slug,
-              milestoneId: milestone.sequenceNumber,
+              milestoneId: milestone.id,
+              milestoneSequenceNumber: milestone.sequenceNumber,
               decision: decision.action,
               reference,
             },

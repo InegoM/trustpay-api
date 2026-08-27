@@ -88,13 +88,17 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
 
     const decision = await app.inject({
       method: "POST",
-      url: "/api/v1/projects/cafe-renovation/milestones/2/decisions",
+      url: "/api/v1/projects/cafe-renovation/milestones/40000000-0000-4000-8000-000000000002/decisions",
       payload: { action: "approve" },
       headers: { cookie },
     });
     expect(decision.statusCode).toBe(201);
     expect(decision.json().data).toMatchObject({
-      milestone: { id: 2, status: "approved" },
+      milestone: {
+        id: "40000000-0000-4000-8000-000000000002",
+        sequenceNumber: 2,
+        status: "approved",
+      },
       project: { approvedValue: 63_000, outstandingValue: 27_000 },
     });
     await app.close();
@@ -118,7 +122,7 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
     const { app, cookie } = await authenticatedApp();
     const response = await app.inject({
       method: "POST",
-      url: "/api/v1/projects/cafe-renovation/milestones/2/decisions",
+      url: "/api/v1/projects/cafe-renovation/milestones/40000000-0000-4000-8000-000000000002/decisions",
       payload: {
         action: "request-changes",
         reason: "Evidence is incomplete",
@@ -138,7 +142,7 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
     const { app, cookie } = await authenticatedApp();
     const response = await app.inject({
       method: "POST",
-      url: "/api/v1/projects/cafe-renovation/milestones/2/decisions",
+      url: "/api/v1/projects/cafe-renovation/milestones/40000000-0000-4000-8000-000000000002/decisions",
       payload: {
         action: "raise-dispute",
         reason: "Layout mismatch",

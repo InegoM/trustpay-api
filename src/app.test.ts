@@ -62,14 +62,18 @@ describe("TrustPay API", () => {
     const cookie = await login(app);
     const decision = await app.inject({
       method: "POST",
-      url: "/api/v1/projects/cafe-renovation/milestones/2/decisions",
+      url: "/api/v1/projects/cafe-renovation/milestones/30000000-0000-4000-8000-000000000002/decisions",
       payload: { action: "approve" },
       headers: { cookie },
     });
 
     expect(decision.statusCode).toBe(201);
     expect(decision.json().data).toMatchObject({
-      milestone: { id: 2, status: "approved" },
+      milestone: {
+        id: "30000000-0000-4000-8000-000000000002",
+        sequenceNumber: 2,
+        status: "approved",
+      },
       project: { approvedValue: 63_000, outstandingValue: 27_000 },
     });
 
@@ -89,7 +93,7 @@ describe("TrustPay API", () => {
     const cookie = await login(app);
     const request = {
       method: "POST" as const,
-      url: "/api/v1/projects/cafe-renovation/milestones/2/decisions",
+      url: "/api/v1/projects/cafe-renovation/milestones/30000000-0000-4000-8000-000000000002/decisions",
       payload: { action: "approve" },
       headers: { cookie },
     };
@@ -105,7 +109,7 @@ describe("TrustPay API", () => {
     const cookie = await login(app);
     const response = await app.inject({
       method: "POST",
-      url: "/api/v1/projects/cafe-renovation/milestones/2/decisions",
+      url: "/api/v1/projects/cafe-renovation/milestones/30000000-0000-4000-8000-000000000002/decisions",
       payload: { action: "raise-dispute", reason: "Layout mismatch", explanation: "short" },
       headers: { cookie },
     });
@@ -153,7 +157,7 @@ describe("TrustPay API", () => {
     const cookie = await login(app, "nadia@example.test");
     const response = await app.inject({
       method: "POST",
-      url: "/api/v1/projects/cafe-renovation/milestones/2/decisions",
+      url: "/api/v1/projects/cafe-renovation/milestones/30000000-0000-4000-8000-000000000002/decisions",
       headers: { cookie },
       payload: { action: "approve" },
     });
@@ -177,6 +181,28 @@ describe("TrustPay API", () => {
       headers: { cookie },
     });
     expect(project.statusCode).toBe(404);
+
+    const milestoneDecision = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects/cafe-renovation/milestones/30000000-0000-4000-8000-000000000002/decisions",
+      headers: { cookie },
+      payload: { action: "approve" },
+    });
+    expect(milestoneDecision.statusCode).toBe(404);
+    expect(milestoneDecision.json().error.code).toBe("PROJECT_NOT_FOUND");
+  });
+
+  it("rejects non-UUID milestone route identifiers", async () => {
+    const app = await testApp();
+    const cookie = await login(app);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects/cafe-renovation/milestones/2/decisions",
+      headers: { cookie },
+      payload: { action: "approve" },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("VALIDATION_ERROR");
   });
 
   it("lets an SME owner create a project, draft agreement, and milestones", async () => {
@@ -220,8 +246,8 @@ describe("TrustPay API", () => {
       agreementStatus: "draft",
       authorizedApprover: "Not yet assigned",
       milestones: [
-        { id: 1, value: 12_500, status: "not-started" },
-        { id: 2, value: 37_500, status: "not-started" },
+        { sequenceNumber: 1, value: 12_500, status: "not-started" },
+        { sequenceNumber: 2, value: 37_500, status: "not-started" },
       ],
     });
   });

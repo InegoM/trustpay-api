@@ -17,9 +17,9 @@ function copy<T>(value: T): T {
   return structuredClone(value);
 }
 
-function reference(projectId: string, milestoneId: number): string {
+function reference(projectId: string, sequenceNumber: number): string {
   const suffix = Date.now().toString(36).toUpperCase();
-  return `TP-${projectId.toUpperCase()}-M${milestoneId}-${suffix}`;
+  return `TP-${projectId.toUpperCase()}-M${sequenceNumber}-${suffix}`;
 }
 
 export default class InMemoryTrustPayRepository implements TrustPayRepository {
@@ -134,7 +134,8 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
       agreementTerms: input.agreement.terms,
       authorizedApprover: "Not yet assigned",
       milestones: input.milestones.map((milestone, index) => ({
-        id: index + 1,
+        id: randomUUID(),
+        sequenceNumber: index + 1,
         name: milestone.name,
         value: milestone.value,
         status: "not-started",
@@ -175,10 +176,14 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
 
   async recordDecision(
     projectId: string,
-    milestoneId: number,
+    milestoneId: string,
     decision: DecisionInput,
     userId: string,
   ): Promise<DecisionResult> {
+    const project = this.projects.get(projectId);
+    if (!this.allowedUsers.has(userId) || !project) {
+      throw new DomainError("Project not found", 404, "PROJECT_NOT_FOUND");
+    }
     if (userId !== "20000000-0000-4000-8000-000000000002") {
       throw new DomainError(
         "Only the authorized customer approver can decide this milestone",
@@ -186,11 +191,6 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
         "DECISION_FORBIDDEN",
       );
     }
-    const project = this.projects.get(projectId);
-    if (!project) {
-      throw new DomainError("Project not found", 404, "PROJECT_NOT_FOUND");
-    }
-
     const milestone = project.milestones.find((item) => item.id === milestoneId);
     if (!milestone) {
       throw new DomainError("Milestone not found", 404, "MILESTONE_NOT_FOUND");
@@ -204,7 +204,7 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
     }
 
     const occurredAt = new Date().toISOString();
-    const decisionReference = reference(projectId, milestoneId);
+    const decisionReference = reference(projectId, milestone.sequenceNumber);
     const events = this.applyDecision(
       project,
       milestone,
@@ -227,6 +227,7 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
     const base = {
       projectId: project.id,
       milestoneId: milestone.id,
+      milestoneSequenceNumber: milestone.sequenceNumber,
       occurredAt,
       reference: decisionReference,
     };
@@ -245,7 +246,7 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
           id: randomUUID(),
           actor: project.authorizedApprover,
           actorType: "customer",
-          description: `Milestone ${milestone.id} approved — ${milestone.name}`,
+          description: `Milestone ${milestone.sequenceNumber} approved — ${milestone.name}`,
           type: "milestone-approved",
         },
         {
