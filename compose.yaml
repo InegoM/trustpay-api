@@ -17,5 +17,24 @@ services:
       timeout: 5s
       retries: 10
 
+  postgres-test:
+    image: postgres:18.3-alpine
+    container_name: trustpay-postgres-test
+    restart: "no"
+    environment:
+      POSTGRES_DB: trustpay_test
+      POSTGRES_USER: trustpay
+      POSTGRES_PASSWORD: trustpay_dev
+    ports:
+      - "127.0.0.1:55433:5432"
+    volumes:
+      - trustpay-postgres-test-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trustpay -d trustpay_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   trustpay-postgres-data:
+  trustpay-postgres-test-data:

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "packageManager": "npm@10.9.2",
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "prisma generate && tsc -p tsconfig.json",
@@ -10,14 +11,20 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:db": "vitest run src/postgres-app.test.ts",
+    "test:db": "node scripts/assert-test-database.mjs && vitest run src/postgres-app.test.ts",
+    "check": "npm run typecheck && npm test && npm run build",
+    "security:password-benchmark": "tsx scripts/benchmark-password.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
     "db:studio": "prisma studio",
     "db:up": "docker compose up -d postgres",
-    "db:down": "docker compose down"
+    "db:down": "docker compose down",
+    "db:test:up": "docker compose up -d postgres-test",
+    "db:test:down": "docker compose stop postgres-test",
+    "db:test:deploy": "prisma migrate deploy --config prisma-test.config.ts",
+    "db:test:seed": "prisma db seed --config prisma-test.config.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.0",
