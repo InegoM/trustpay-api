@@ -348,4 +348,112 @@ describe("TrustPay API", () => {
     expect(response.statusCode).toBe(409);
     expect(response.json().error.code).toBe("APPROVER_ALREADY_ASSIGNED");
   });
+
+  it("lets the assigned customer approver accept one exact draft agreement version", async () => {
+    const app = await testApp();
+    const cookie = await login(app, "omar@example.test");
+    const agreements = await app.inject({
+      method: "GET",
+      url: "/api/v1/projects/agreement-review/agreements",
+      headers: { cookie },
+    });
+    expect(agreements.statusCode).toBe(200);
+    const agreementId = agreements.json().data[0].id as string;
+    const acceptance = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/agreement-review/agreements/${agreementId}/decisions`,
+      headers: { cookie, "idempotency-key": "aaaaaaaaaaaaaaaa" },
+      payload: { action: "accept", authorityConfirmed: true, expectedVersionId: agreementId },
+    });
+    expect(acceptance.statusCode).toBe(201);
+    expect(acceptance.json().data).toMatchObject({
+      agreement: { id: agreementId, status: "active", acceptance: { acceptedBy: "Omar Hassan", organization: "Cedar Café" } },
+      event: { type: "agreement-accepted", projectId: "agreement-review" },
+    });
+    expect(acceptance.json().data.agreement.acceptance.reference).toMatch(/^TP-AGR-/);
+    expect(acceptance.headers["set-cookie"]).toContain("trustpay_session=");
+  });
+
+  it("replays an agreement acceptance only for the same idempotency key and rejects duplicates", async () => {
+    const app = await testApp();
+    const originalCookie = await login(app, "omar@example.test");
+    const agreementId = "50000000-0000-4000-8000-000000000002";
+    const payload = { action: "accept", authorityConfirmed: true, expectedVersionId: agreementId };
+    const first = await app.inject({
+      method: "POST", url: `/api/v1/projects/agreement-review/agreements/${agreementId}/decisions`,
+      headers: { cookie: originalCookie, "idempotency-key": "bbbbbbbbbbbbbbbb" }, payload,
+    });
+    const replacementCookie = first.headers["set-cookie"]?.split(";")[0];
+    const replay = await app.inject({
+      method: "POST", url: `/api/v1/projects/agreement-review/agreements/${agreementId}/decisions`,
+      headers: { cookie: replacementCookie, "idempotency-key": "bbbbbbbbbbbbbbbb" }, payload,
+    });
+    expect(replay.statusCode).toBe(201);
+    expect(replay.json().data.agreement.acceptance.reference).toBe(first.json().data.agreement.acceptance.reference);
+    const duplicate = await app.inject({
+      method: "POST", url: `/api/v1/projects/agreement-review/agreements/${agreementId}/decisions`,
+      headers: { cookie: replacementCookie, "idempotency-key": "cccccccccccccccc" }, payload,
+    });
+    expect(duplicate.statusCode).toBe(409);
+    expect(duplicate.json().error.code).toBe("AGREEMENT_VERSION_STALE");
+  });
+
+  it("records an amendment request and creates an immutable replacement version", async () => {
+    const app = await testApp();
+    const customerCookie = await login(app, "omar@example.test");
+    const agreementId = "50000000-0000-4000-8000-000000000002";
+    const requested = await app.inject({
+      method: "POST", url: `/api/v1/projects/agreement-review/agreements/${agreementId}/decisions`,
+      headers: { cookie: customerCookie, "idempotency-key": "dddddddddddddddd" },
+      payload: { action: "request-amendment", reason: "Please clarify the handover criteria.", expectedVersionId: agreementId },
+    });
+    expect(requested.statusCode).toBe(201);
+    expect(requested.json().data.agreement).toMatchObject({ status: "amendment-requested", amendmentRequest: { requestedBy: "Omar Hassan" } });
+
+    const smeCookie = await login(app, "nadia@example.test");
+    const replacement = await app.inject({
+      method: "POST", url: "/api/v1/projects/agreement-review/agreements", headers: { cookie: smeCookie },
+      payload: {
+        baseVersionId: agreementId,
+        title: "Agreement Review Project Agreement — clarified",
+        scope: "Renovate the agreed customer area with the clarified handover scope.",
+        terms: "Each milestone is reviewed against its acceptance criteria, including the clarified handover criteria.",
+      },
+    });
+    expect(replacement.statusCode).toBe(201);
+    expect(replacement.json().data).toMatchObject({ versionNumber: 2, status: "draft", content: { title: "Agreement Review Project Agreement — clarified" } });
+    const history = await app.inject({ method: "GET", url: "/api/v1/projects/agreement-review/agreements", headers: { cookie: smeCookie } });
+    expect(history.json().data.map((agreement: { status: string }) => agreement.status)).toEqual(["draft", "superseded"]);
+  });
+
+  it("rejects unassigned, cross-organization, stale, and malformed agreement actions", async () => {
+    const app = await testApp();
+    const agreementId = "50000000-0000-4000-8000-000000000002";
+    const smeCookie = await login(app, "nadia@example.test");
+    const forbidden = await app.inject({
+      method: "POST", url: `/api/v1/projects/agreement-review/agreements/${agreementId}/decisions`,
+      headers: { cookie: smeCookie, "idempotency-key": "eeeeeeeeeeeeeeee" },
+      payload: { action: "accept", authorityConfirmed: true, expectedVersionId: agreementId },
+    });
+    expect(forbidden.statusCode).toBe(403);
+
+    const bankCookie = await login(app, "samir@bank.example.test");
+    const crossTenant = await app.inject({
+      method: "GET", url: `/api/v1/projects/agreement-review/agreements/${agreementId}`, headers: { cookie: bankCookie },
+    });
+    expect(crossTenant.statusCode).toBe(404);
+
+    const customerCookie = await login(app, "omar@example.test");
+    const stale = await app.inject({
+      method: "POST", url: `/api/v1/projects/agreement-review/agreements/${agreementId}/decisions`,
+      headers: { cookie: customerCookie, "idempotency-key": "ffffffffffffffff" },
+      payload: { action: "accept", authorityConfirmed: true, expectedVersionId: "50000000-0000-4000-8000-000000000001" },
+    });
+    expect(stale.statusCode).toBe(409);
+    const missingKey = await app.inject({
+      method: "POST", url: `/api/v1/projects/agreement-review/agreements/${agreementId}/decisions`, headers: { cookie: customerCookie },
+      payload: { action: "accept", authorityConfirmed: true, expectedVersionId: agreementId },
+    });
+    expect(missingKey.statusCode).toBe(400);
+  });
 });

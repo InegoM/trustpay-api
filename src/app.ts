@@ -49,7 +49,7 @@ export default async function createApp({
   }));
 
   await app.register(authRoutes(authService, secureCookies), { prefix: "/api/v1" });
-  await app.register(trustPayRoutes(repository, authService), { prefix: "/api/v1" });
+  await app.register(trustPayRoutes(repository, authService, secureCookies), { prefix: "/api/v1" });
 
   return app;
 }

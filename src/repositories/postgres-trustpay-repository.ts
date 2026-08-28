@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   ActivityType as DbActivityType,
+  AgreementStatus as DbAgreementStatus,
   DecisionAction,
   MilestoneStatus as DbMilestoneStatus,
   Prisma,
@@ -11,6 +12,12 @@ import { DomainError } from "../domain/errors.js";
 import type {
   ActivityEvent,
   ActivityType,
+  AgreementContent,
+  AgreementDecisionInput,
+  AgreementDecisionResult,
+  AgreementStatus,
+  AgreementVersion,
+  CreateAgreementVersionInput,
   CreateProjectInput,
   CreatedProjectInvitation,
   DecisionInput,
@@ -47,6 +54,18 @@ const projectInclude = {
   },
 } as const satisfies Prisma.ProjectInclude;
 
+const agreementInclude = {
+  createdBy: true,
+  acceptances: {
+    orderBy: { acceptedAt: "desc" },
+    include: { organization: true, acceptedBy: true },
+  },
+  amendmentRequests: {
+    orderBy: { requestedAt: "desc" },
+    include: { organization: true, requestedBy: true },
+  },
+} as const satisfies Prisma.AgreementVersionInclude;
+
 type ProjectRow = Prisma.ProjectGetPayload<{ include: typeof projectInclude }>;
 
 function money(value: bigint): number {
@@ -80,6 +99,109 @@ function agreementVersionLabel(versionNumber: number): string {
     : `v${versionNumber}.0`;
 }
 
+function agreementStatus(status: DbAgreementStatus): AgreementStatus {
+  if (status === "ACTIVE") return "active";
+  if (status === "SUPERSEDED") return "superseded";
+  if (status === "AMENDMENT_REQUESTED") return "amendment-requested";
+  return "draft";
+}
+
+function canonicalAgreementContent(content: AgreementContent): string {
+  return JSON.stringify({
+    title: content.title,
+    scope: content.scope,
+    terms: content.terms,
+    currency: content.currency,
+    projectValue: content.projectValue,
+    milestones: content.milestones.map((milestone) => ({
+      sequenceNumber: milestone.sequenceNumber,
+      name: milestone.name,
+      ...(milestone.description ? { description: milestone.description } : {}),
+      value: milestone.value,
+      acceptanceCriteria: [...milestone.acceptanceCriteria],
+    })),
+  });
+}
+
+function agreementContentFromJson(content: Prisma.JsonValue): AgreementContent | null {
+  if (!content || typeof content !== "object" || Array.isArray(content)) return null;
+  const value = content as Record<string, unknown>;
+  if (
+    typeof value.title !== "string" ||
+    typeof value.scope !== "string" ||
+    typeof value.terms !== "string" ||
+    typeof value.currency !== "string" ||
+    typeof value.projectValue !== "number" ||
+    !Array.isArray(value.milestones)
+  ) {
+    return null;
+  }
+  const milestones = value.milestones.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const milestone = item as Record<string, unknown>;
+    if (
+      typeof milestone.sequenceNumber !== "number" ||
+      typeof milestone.name !== "string" ||
+      typeof milestone.value !== "number" ||
+      !Array.isArray(milestone.acceptanceCriteria) ||
+      !milestone.acceptanceCriteria.every((criterion) => typeof criterion === "string")
+    ) {
+      return [];
+    }
+    return [{
+      sequenceNumber: milestone.sequenceNumber,
+      name: milestone.name,
+      ...(typeof milestone.description === "string" ? { description: milestone.description } : {}),
+      value: milestone.value,
+      acceptanceCriteria: milestone.acceptanceCriteria,
+    }];
+  });
+  return milestones.length === value.milestones.length
+    ? { title: value.title, scope: value.scope, terms: value.terms, currency: value.currency, projectValue: value.projectValue, milestones }
+    : null;
+}
+
+type AgreementRow = Prisma.AgreementVersionGetPayload<{ include: typeof agreementInclude }>;
+
+function mapAgreement(row: AgreementRow): AgreementVersion {
+  const content = agreementContentFromJson(row.content);
+  if (!content) throw new Error("Agreement content is invalid");
+  const acceptance = row.acceptances[0];
+  const amendmentRequest = row.amendmentRequests[0];
+  return {
+    id: row.id,
+    versionNumber: row.versionNumber,
+    label: agreementVersionLabel(row.versionNumber),
+    status: agreementStatus(row.status),
+    content,
+    contentHash: row.contentHash,
+    createdAt: row.createdAt.toISOString(),
+    createdBy: row.createdBy.displayName,
+    ...(acceptance
+      ? {
+          acceptance: {
+            id: acceptance.id,
+            organization: acceptance.organization.name,
+            acceptedBy: acceptance.acceptedBy.displayName,
+            acceptedAt: acceptance.acceptedAt.toISOString(),
+            reference: acceptance.reference,
+          },
+        }
+      : {}),
+    ...(amendmentRequest
+      ? {
+          amendmentRequest: {
+            id: amendmentRequest.id,
+            reason: amendmentRequest.reason,
+            requestedBy: amendmentRequest.requestedBy.displayName,
+            requestedAt: amendmentRequest.requestedAt.toISOString(),
+            reference: amendmentRequest.reference,
+          },
+        }
+      : {}),
+  };
+}
+
 function mapProject(row: ProjectRow): Project {
   const customer = row.parties.find((party) => party.role === ProjectPartyRole.CUSTOMER);
   const sme = row.parties.find((party) => party.role === ProjectPartyRole.SME);
@@ -104,6 +226,7 @@ function mapProject(row: ProjectRow): Project {
     agreementVersion: agreement
       ? agreementVersionLabel(agreement.versionNumber)
       : "Not accepted",
+    ...(agreement ? { agreementId: agreement.id } : {}),
     agreementStatus: agreement?.status === "ACTIVE" ? "active" : "draft",
     ...(typeof agreementContent?.title === "string"
       ? { agreementTitle: agreementContent.title }
@@ -149,7 +272,8 @@ const activityTypes: Record<DbActivityType, ActivityType> = {
   CUSTOMER_INVITED: "customer-invited",
   CUSTOMER_APPROVER_JOINED: "customer-approver-joined",
   AGREEMENT_ACCEPTED: "agreement-accepted",
-  AGREEMENT_SENT: "agreement-accepted",
+  AGREEMENT_SENT: "agreement-version-created",
+  AGREEMENT_AMENDMENT_REQUESTED: "agreement-amendment-requested",
   EVIDENCE_SUBMITTED: "evidence-submitted",
   MILESTONE_APPROVED: "milestone-approved",
   CHANGES_REQUESTED: "changes-requested",
@@ -308,22 +432,27 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
           ],
         });
 
-        const agreementContent = {
+        const agreementContent: AgreementContent = {
           title: input.agreement.title,
           scope: input.agreement.scope,
           terms: input.agreement.terms,
           currency: input.currencyCode.toUpperCase(),
-          projectValueMinor: Number(agreedValueMinor),
+          projectValue: money(agreedValueMinor),
+          milestones: input.milestones.map((milestone, index) => ({
+            sequenceNumber: index + 1,
+            name: milestone.name,
+            ...(milestone.description ? { description: milestone.description } : {}),
+            value: milestone.value,
+            acceptanceCriteria: milestone.acceptanceCriteria,
+          })),
         };
         await tx.agreementVersion.create({
           data: {
             projectId: project.id,
             versionNumber: 1,
             status: "DRAFT",
-            content: agreementContent,
-            contentHash: createHash("sha256")
-              .update(JSON.stringify(agreementContent))
-              .digest("hex"),
+            content: agreementContent as unknown as Prisma.InputJsonValue,
+            contentHash: createHash("sha256").update(canonicalAgreementContent(agreementContent)).digest("hex"),
             createdByUserId: userId,
           },
         });
@@ -513,6 +642,253 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
     return row ? mapProject(row) : null;
   }
 
+  async listAgreements(projectId: string, userId: string): Promise<AgreementVersion[]> {
+    const project = await this.prisma.project.findFirst({
+      where: { slug: projectId, OR: projectAccess(userId) },
+      select: { id: true },
+    });
+    if (!project) return [];
+    const agreements = await this.prisma.agreementVersion.findMany({
+      where: { projectId: project.id },
+      include: agreementInclude,
+      orderBy: { versionNumber: "desc" },
+    });
+    return agreements.map(mapAgreement);
+  }
+
+  async findAgreement(
+    projectId: string,
+    agreementId: string,
+    userId: string,
+  ): Promise<AgreementVersion | null> {
+    const agreement = await this.prisma.agreementVersion.findFirst({
+      where: {
+        id: agreementId,
+        project: { slug: projectId, OR: projectAccess(userId) },
+      },
+      include: agreementInclude,
+    });
+    return agreement ? mapAgreement(agreement) : null;
+  }
+
+  async createAgreementVersion(
+    projectId: string,
+    input: CreateAgreementVersionInput,
+    userId: string,
+  ): Promise<AgreementVersion> {
+    return this.prisma.$transaction(async (tx) => {
+      const project = await tx.project.findFirst({
+        where: {
+          slug: projectId,
+          owningOrganization: {
+            memberships: { some: { userId, role: { in: ["OWNER", "ADMIN"] } } },
+          },
+        },
+        include: { owningOrganization: true },
+      });
+      if (!project) throw new DomainError("Project not found", 404, "PROJECT_NOT_FOUND");
+
+      const base = await tx.agreementVersion.findFirst({
+        where: {
+          id: input.baseVersionId,
+          projectId: project.id,
+          status: DbAgreementStatus.AMENDMENT_REQUESTED,
+        },
+        include: agreementInclude,
+      });
+      if (!base) {
+        throw new DomainError(
+          "This agreement is no longer awaiting an amendment",
+          409,
+          "AGREEMENT_VERSION_STALE",
+        );
+      }
+      const baseContent = agreementContentFromJson(base.content);
+      if (!baseContent) throw new DomainError("Agreement content is invalid", 409, "AGREEMENT_INVALID");
+      const content: AgreementContent = {
+        ...baseContent,
+        title: input.title,
+        scope: input.scope,
+        terms: input.terms,
+        // The schedule is copied from the authoritative original snapshot, never inferred from a UI array position.
+        milestones: baseContent.milestones.map((milestone) => ({ ...milestone, acceptanceCriteria: [...milestone.acceptanceCriteria] })),
+      };
+      const latest = await tx.agreementVersion.aggregate({
+        where: { projectId: project.id },
+        _max: { versionNumber: true },
+      });
+      const superseded = await tx.agreementVersion.updateMany({
+        where: { id: base.id, status: DbAgreementStatus.AMENDMENT_REQUESTED },
+        data: { status: DbAgreementStatus.SUPERSEDED },
+      });
+      if (superseded.count !== 1) {
+        throw new DomainError("This agreement changed before it could be amended", 409, "AGREEMENT_VERSION_STALE");
+      }
+      const createdAgreement = await tx.agreementVersion.create({
+        data: {
+          projectId: project.id,
+          versionNumber: (latest._max.versionNumber ?? 0) + 1,
+          status: DbAgreementStatus.DRAFT,
+          content: content as unknown as Prisma.InputJsonValue,
+          contentHash: createHash("sha256").update(canonicalAgreementContent(content)).digest("hex"),
+          createdByUserId: userId,
+        },
+      });
+      const created = await tx.agreementVersion.findUniqueOrThrow({
+        where: { id: createdAgreement.id },
+        include: agreementInclude,
+      });
+      const actor = await tx.user.findUniqueOrThrow({ where: { id: userId } });
+      await tx.activityEvent.create({
+        data: {
+          projectId: project.id,
+          actorUserId: userId,
+          actorOrganizationId: project.owningOrganizationId,
+          actorName: actor.displayName,
+          actorType: "sme",
+          type: DbActivityType.AGREEMENT_SENT,
+          description: `Agreement ${agreementVersionLabel(created.versionNumber)} created in response to an amendment request`,
+          payload: { agreementVersionId: created.id, replacesAgreementVersionId: base.id, source: "web" },
+        },
+      });
+      return mapAgreement(created);
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
+
+  async recordAgreementDecision(
+    projectId: string,
+    agreementId: string,
+    decision: AgreementDecisionInput,
+    userId: string,
+    idempotencyKey: string,
+    metadata: { ipAddress?: string; userAgent?: string },
+  ): Promise<AgreementDecisionResult> {
+    const requestHash = createHash("sha256").update(JSON.stringify(decision)).digest("hex");
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const existingKey = await tx.idempotencyKey.findUnique({
+          where: { scope_key: { scope: `agreement-decision:${userId}`, key: idempotencyKey } },
+        });
+        if (existingKey) {
+          if (existingKey.requestHash !== requestHash) {
+            throw new DomainError("This idempotency key was used for a different request", 409, "IDEMPOTENCY_KEY_REUSED");
+          }
+          if (existingKey.responseBody) {
+            return { ...(existingKey.responseBody as unknown as AgreementDecisionResult), replayed: true };
+          }
+          throw new DomainError("This request is already being processed", 409, "IDEMPOTENCY_IN_PROGRESS");
+        }
+        await tx.idempotencyKey.create({
+          data: {
+            userId,
+            scope: `agreement-decision:${userId}`,
+            key: idempotencyKey,
+            requestHash,
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+          },
+        });
+
+        const project = await tx.project.findFirst({
+          where: { slug: projectId, OR: projectAccess(userId) },
+          include: { parties: { include: { organization: true, authorizedApprover: true } } },
+        });
+        if (!project) throw new DomainError("Project not found", 404, "PROJECT_NOT_FOUND");
+        const customer = project.parties.find((party) => party.role === ProjectPartyRole.CUSTOMER);
+        if (!customer?.authorizedApproverUserId || !customer.authorizedApprover) {
+          throw new DomainError("No authorized customer approver is assigned", 409, "APPROVER_NOT_ASSIGNED");
+        }
+        if (customer.authorizedApproverUserId !== userId) {
+          throw new DomainError("Only the authorized customer approver can decide on this agreement", 403, "AGREEMENT_DECISION_FORBIDDEN");
+        }
+        if (decision.expectedVersionId !== agreementId) {
+          throw new DomainError("The agreement version is stale", 409, "AGREEMENT_VERSION_STALE");
+        }
+        const agreement = await tx.agreementVersion.findFirst({
+          where: { id: agreementId, projectId: project.id },
+          include: agreementInclude,
+        });
+        if (!agreement) throw new DomainError("Agreement not found", 404, "AGREEMENT_NOT_FOUND");
+        if (agreement.status !== DbAgreementStatus.DRAFT) {
+          throw new DomainError("This agreement version is no longer awaiting a decision", 409, "AGREEMENT_VERSION_STALE");
+        }
+
+        const reference = `TP-AGR-${randomUUID().slice(0, 8)}`.toUpperCase();
+        let eventType: DbActivityType;
+        let description: string;
+        if (decision.action === "accept") {
+          const activated = await tx.agreementVersion.updateMany({
+            where: { id: agreement.id, status: DbAgreementStatus.DRAFT },
+            data: { status: DbAgreementStatus.ACTIVE },
+          });
+          if (activated.count !== 1) throw new DomainError("This agreement changed before acceptance", 409, "AGREEMENT_VERSION_STALE");
+          await tx.agreementAcceptance.create({
+            data: {
+              agreementVersionId: agreement.id,
+              organizationId: customer.organizationId,
+              acceptedByUserId: userId,
+              reference,
+              ...(metadata.ipAddress ? { ipAddress: metadata.ipAddress } : {}),
+              ...(metadata.userAgent ? { userAgent: metadata.userAgent.slice(0, 512) } : {}),
+            },
+          });
+          eventType = DbActivityType.AGREEMENT_ACCEPTED;
+          description = `Agreement ${agreementVersionLabel(agreement.versionNumber)} acceptance recorded by ${customer.authorizedApprover.displayName}`;
+        } else {
+          const requested = await tx.agreementVersion.updateMany({
+            where: { id: agreement.id, status: DbAgreementStatus.DRAFT },
+            data: { status: DbAgreementStatus.AMENDMENT_REQUESTED },
+          });
+          if (requested.count !== 1) throw new DomainError("This agreement changed before the amendment request", 409, "AGREEMENT_VERSION_STALE");
+          await tx.agreementAmendmentRequest.create({
+            data: {
+              agreementVersionId: agreement.id,
+              organizationId: customer.organizationId,
+              requestedByUserId: userId,
+              reason: decision.reason,
+              reference,
+            },
+          });
+          eventType = DbActivityType.AGREEMENT_AMENDMENT_REQUESTED;
+          description = `Amendment requested for agreement ${agreementVersionLabel(agreement.versionNumber)}: ${decision.reason}`;
+        }
+        const event = await tx.activityEvent.create({
+          data: {
+            projectId: project.id,
+            actorUserId: userId,
+            actorOrganizationId: customer.organizationId,
+            actorName: customer.authorizedApprover.displayName,
+            actorType: "customer",
+            type: eventType,
+            description,
+            reference,
+            payload: { agreementVersionId: agreement.id, actorRole: "APPROVER", source: "web" },
+          },
+          include: { milestone: true },
+        });
+        await tx.outboxEvent.create({
+          data: {
+            aggregateType: "agreement",
+            aggregateId: agreement.id,
+            eventType,
+            payload: { projectId: project.slug, agreementVersionId: agreement.id, action: decision.action, reference },
+          },
+        });
+        const refreshed = await tx.agreementVersion.findUniqueOrThrow({ where: { id: agreement.id }, include: agreementInclude });
+        const result: AgreementDecisionResult = { agreement: mapAgreement(refreshed), event: mapActivity(event, project.slug) };
+        await tx.idempotencyKey.update({
+          where: { scope_key: { scope: `agreement-decision:${userId}`, key: idempotencyKey } },
+          data: { responseStatus: 201, responseBody: result as unknown as Prisma.InputJsonValue },
+        });
+        return result;
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === "P2002" || error.code === "P2034")) {
+        throw new DomainError("This agreement changed before the request completed", 409, "AGREEMENT_VERSION_STALE");
+      }
+      throw error;
+    }
+  }
+
   async listActivity(projectId: string, userId: string): Promise<ActivityEvent[]> {
     const project = await this.prisma.project.findFirst({
       where: { slug: projectId, OR: projectAccess(userId) },
@@ -540,6 +916,10 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
           where: { slug: projectId, OR: projectAccess(userId) },
           include: {
             parties: { include: { authorizedApprover: true } },
+            agreementVersions: {
+              where: { status: DbAgreementStatus.ACTIVE },
+              include: { acceptances: true },
+            },
             milestones: {
               where: { id: milestoneId },
               include: {
@@ -553,6 +933,13 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
         });
         if (!project) {
           throw new DomainError("Project not found", 404, "PROJECT_NOT_FOUND");
+        }
+        if (!project.agreementVersions.some((agreement) => agreement.acceptances.length > 0)) {
+          throw new DomainError(
+            "A recorded agreement acceptance is required before milestone decisions",
+            409,
+            "AGREEMENT_NOT_ACCEPTED",
+          );
         }
 
         const milestone = project.milestones[0];

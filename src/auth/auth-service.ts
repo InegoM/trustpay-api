@@ -7,6 +7,7 @@ import type {
 export interface AuthService {
   login(email: string, password: string): Promise<AuthenticatedSession>;
   authenticate(token: string): Promise<AuthUser | null>;
+  rotateSession(token: string): Promise<AuthenticatedSession>;
   logout(token: string): Promise<void>;
   acceptInvitation(input: AcceptInvitationInput): Promise<AuthenticatedSession>;
 }

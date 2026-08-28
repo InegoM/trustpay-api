@@ -306,4 +306,79 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
     });
     await app.close();
   });
+
+  it("persists exactly one authorized agreement acceptance and its immutable history", async () => {
+    const { app, cookie: smeCookie } = await authenticatedApp("nadia@example.test");
+    const code = `AGR-${Date.now()}`;
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects",
+      headers: { cookie: smeCookie },
+      payload: {
+        name: "Agreement Acceptance Test",
+        code,
+        customerName: "Agreement Test Customer",
+        currencyCode: "AED",
+        agreement: {
+          title: "Agreement Acceptance Test Agreement",
+          scope: "Record an exact agreement version before any milestone can be submitted.",
+          terms: "Only the assigned customer approver can record acceptance of this version.",
+        },
+        milestones: [{ name: "Initial scope", value: 5000, acceptanceCriteria: ["The documented scope is available"] }],
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const projectSlug = created.json().data.id as string;
+    const project = await prisma.project.findUniqueOrThrow({ where: { slug: projectSlug }, include: { parties: true, agreementVersions: true } });
+    const agreement = project.agreementVersions[0];
+    if (!agreement) throw new Error("Created agreement is missing");
+    const invitedEmail = `agreement-approver-${Date.now()}@example.test`;
+    const invitation = await app.inject({ method: "POST", url: `/api/v1/projects/${projectSlug}/invitations`, headers: { cookie: smeCookie }, payload: { email: invitedEmail } });
+    expect(invitation.statusCode).toBe(201);
+    const acceptedInvitation = await app.inject({
+      method: "POST", url: "/api/v1/invitations/accept",
+      payload: { token: invitation.json().data.token, displayName: "Agreement Approver", password: "AgreementSecure2026" },
+    });
+    const customerCookie = acceptedInvitation.headers["set-cookie"]?.split(";")[0];
+    const acceptance = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectSlug}/agreements/${agreement.id}/decisions`,
+      headers: { cookie: customerCookie, "idempotency-key": "gggggggggggggggg" },
+      payload: { action: "accept", authorityConfirmed: true, expectedVersionId: agreement.id },
+    });
+    expect(acceptance.statusCode).toBe(201);
+    expect(acceptance.json().data).toMatchObject({
+      agreement: { id: agreement.id, status: "active", acceptance: { acceptedBy: "Agreement Approver" } },
+      event: { type: "agreement-accepted" },
+    });
+    const persisted = await prisma.agreementVersion.findUniqueOrThrow({
+      where: { id: agreement.id },
+      include: { acceptances: true, amendmentRequests: true },
+    });
+    expect(persisted.status).toBe("ACTIVE");
+    expect(persisted.acceptances).toHaveLength(1);
+    expect(persisted.acceptances[0]?.reference).toMatch(/^TP-AGR-/);
+    expect(persisted.amendmentRequests).toHaveLength(0);
+
+    const invitedUser = await prisma.user.findUniqueOrThrow({ where: { email: invitedEmail } });
+    const customerParty = project.parties.find((party) => party.role === "CUSTOMER");
+    await prisma.$transaction(async (tx) => {
+      await tx.activityEvent.deleteMany({ where: { projectId: project.id } });
+      await tx.outboxEvent.deleteMany({ where: { aggregateId: { in: [agreement.id, invitation.json().data.invitation.id] } } });
+      await tx.idempotencyKey.deleteMany({ where: { userId: invitedUser.id } });
+      await tx.invitation.deleteMany({ where: { projectId: project.id } });
+      await tx.agreementAcceptance.deleteMany({ where: { agreementVersionId: agreement.id } });
+      await tx.acceptanceCriterion.deleteMany({ where: { milestone: { projectId: project.id } } });
+      await tx.milestone.deleteMany({ where: { projectId: project.id } });
+      await tx.agreementVersion.deleteMany({ where: { projectId: project.id } });
+      await tx.projectParty.deleteMany({ where: { projectId: project.id } });
+      await tx.project.delete({ where: { id: project.id } });
+      await tx.authSession.deleteMany({ where: { userId: invitedUser.id } });
+      await tx.organizationMembership.deleteMany({ where: { userId: invitedUser.id } });
+      await tx.userCredential.deleteMany({ where: { userId: invitedUser.id } });
+      await tx.user.delete({ where: { id: invitedUser.id } });
+      if (customerParty) await tx.organization.delete({ where: { id: customerParty.organizationId } });
+    });
+    await app.close();
+  });
 });
