@@ -163,12 +163,22 @@ async function main() {
   const agreementContent = {
     title: "Café Renovation Agreement",
     scope: "Design, structural work, electrical work, finishing and handover",
+    terms: "Each milestone is reviewed against its acceptance criteria before the customer records a decision.",
     currency: "AED",
-    projectValueMinor: 9_000_000,
+    projectValue: 90_000,
+    milestones: [
+      { sequenceNumber: 1, name: "Design and planning", value: 18_000, acceptanceCriteria: [] },
+      { sequenceNumber: 2, name: "Structural and electrical work", value: 45_000, acceptanceCriteria: ["Structural partitions match the approved layout", "Electrical and plumbing rough-in is complete", "Submitted evidence clearly shows completed work"] },
+      { sequenceNumber: 3, name: "Finishing and handover", value: 27_000, acceptanceCriteria: [] },
+    ],
   };
   await prisma.agreementVersion.upsert({
     where: { id: ids.agreement },
-    update: { status: "ACTIVE", content: agreementContent },
+    update: {
+      status: "ACTIVE",
+      content: agreementContent,
+      contentHash: createHash("sha256").update(JSON.stringify(agreementContent)).digest("hex"),
+    },
     create: {
       id: ids.agreement,
       projectId: ids.project,
@@ -188,12 +198,13 @@ async function main() {
         organizationId: ids.cedar,
       },
     },
-    update: { acceptedByUserId: ids.omar },
+    update: { acceptedByUserId: ids.omar, reference: "TP-AGR-SEED-0001" },
     create: {
       agreementVersionId: ids.agreement,
       organizationId: ids.cedar,
       acceptedByUserId: ids.omar,
       acceptedAt: new Date("2026-08-08T16:05:00+04:00"),
+      reference: "TP-AGR-SEED-0001",
     },
   });
 

@@ -76,6 +76,15 @@ export default class InMemoryAuthService implements AuthService {
     return this.sessions.get(token) ?? null;
   }
 
+  async rotateSession(token: string): Promise<AuthenticatedSession> {
+    const user = this.sessions.get(token);
+    if (!user) throw new DomainError("Authentication is required", 401, "UNAUTHENTICATED");
+    this.sessions.delete(token);
+    const nextToken = randomUUID();
+    this.sessions.set(nextToken, user);
+    return { user, token: nextToken, expiresAt: new Date(Date.now() + 12 * 60 * 60 * 1000) };
+  }
+
   async logout(token: string): Promise<void> {
     this.sessions.delete(token);
   }

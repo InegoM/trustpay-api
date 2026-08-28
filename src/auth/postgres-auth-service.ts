@@ -107,6 +107,18 @@ export default class PostgresAuthService implements AuthService {
     return mapUser(session.user);
   }
 
+  async rotateSession(token: string): Promise<AuthenticatedSession> {
+    const session = await this.prisma.authSession.findUnique({
+      where: { tokenHash: tokenHash(token) },
+      select: { userId: true, expiresAt: true, revokedAt: true },
+    });
+    if (!session || session.revokedAt || session.expiresAt <= new Date()) {
+      throw new DomainError("Authentication is required", 401, "UNAUTHENTICATED");
+    }
+    await this.prisma.authSession.update({ where: { tokenHash: tokenHash(token) }, data: { revokedAt: new Date() } });
+    return this.createSession(session.userId);
+  }
+
   async logout(token: string): Promise<void> {
     await this.prisma.authSession.updateMany({
       where: { tokenHash: tokenHash(token), revokedAt: null },

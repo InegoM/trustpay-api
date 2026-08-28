@@ -51,6 +51,7 @@ enum AgreementStatus {
   DRAFT
   ACTIVE
   SUPERSEDED
+  AMENDMENT_REQUESTED
 }
 
 enum MilestoneStatus {
@@ -86,6 +87,7 @@ enum ActivityType {
   CUSTOMER_APPROVER_JOINED
   AGREEMENT_ACCEPTED
   AGREEMENT_SENT
+  AGREEMENT_AMENDMENT_REQUESTED
   EVIDENCE_SUBMITTED
   MILESTONE_APPROVED
   CHANGES_REQUESTED
@@ -116,6 +118,7 @@ model Organization {
   projectParties     ProjectParty[]
   contractTemplates  ContractTemplate[]
   agreementAcceptances AgreementAcceptance[]
+  agreementAmendmentRequests AgreementAmendmentRequest[]
   actorEvents        ActivityEvent[]          @relation("ActivityActorOrganization")
   notifications      Notification[]
 
@@ -135,6 +138,7 @@ model User {
   authorizedProjectParties ProjectParty[]           @relation("AuthorizedProjectParty")
   agreementVersionsCreated AgreementVersion[]       @relation("AgreementVersionCreator")
   agreementAcceptances     AgreementAcceptance[]
+  agreementAmendmentRequests AgreementAmendmentRequest[]
   submissions              MilestoneSubmission[]
   evidenceUploads          EvidenceItem[]
   decisions                MilestoneDecision[]
@@ -294,6 +298,7 @@ model AgreementVersion {
   templateVersion   TemplateVersion?      @relation(fields: [templateVersionId], references: [id], onDelete: Restrict)
   createdBy         User                  @relation("AgreementVersionCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
   acceptances       AgreementAcceptance[]
+  amendmentRequests AgreementAmendmentRequest[]
   variations        Variation[]
 
   @@unique([projectId, versionNumber])
@@ -309,6 +314,7 @@ model AgreementAcceptance {
   acceptedAt         DateTime         @default(now()) @map("accepted_at")
   ipAddress          String?          @map("ip_address") @db.Inet
   userAgent          String?          @map("user_agent")
+  reference          String           @unique
   agreementVersion   AgreementVersion @relation(fields: [agreementVersionId], references: [id], onDelete: Restrict)
   organization       Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   acceptedBy         User             @relation(fields: [acceptedByUserId], references: [id], onDelete: Restrict)
@@ -316,6 +322,23 @@ model AgreementAcceptance {
   @@unique([agreementVersionId, organizationId])
   @@index([acceptedByUserId])
   @@map("agreement_acceptances")
+}
+
+model AgreementAmendmentRequest {
+  id                    String           @id @default(uuid()) @db.Uuid
+  agreementVersionId    String           @map("agreement_version_id") @db.Uuid
+  organizationId        String           @map("organization_id") @db.Uuid
+  requestedByUserId     String           @map("requested_by_user_id") @db.Uuid
+  reason                String
+  reference             String           @unique
+  requestedAt           DateTime         @default(now()) @map("requested_at")
+  agreementVersion      AgreementVersion @relation(fields: [agreementVersionId], references: [id], onDelete: Restrict)
+  organization          Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  requestedBy           User             @relation(fields: [requestedByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([agreementVersionId, organizationId])
+  @@index([requestedByUserId])
+  @@map("agreement_amendment_requests")
 }
 
 model Milestone {

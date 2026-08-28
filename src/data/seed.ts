@@ -10,6 +10,7 @@ export const seedProject: Project = {
   outstandingValue: 72_000,
   status: "in-progress",
   agreementVersion: "v1.2",
+  agreementId: "50000000-0000-4000-8000-000000000001",
   agreementStatus: "active",
   agreementTitle: "Café Renovation Agreement",
   agreementScope: "Design, structural work, electrical work, finishing and handover",

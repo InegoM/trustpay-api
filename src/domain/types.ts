@@ -29,6 +29,7 @@ export interface Project {
   outstandingValue: number;
   status: "in-progress" | "completed" | "on-hold";
   agreementVersion: string;
+  agreementId?: string;
   agreementStatus: "draft" | "active";
   agreementTitle?: string;
   agreementScope?: string;
@@ -36,6 +37,71 @@ export interface Project {
   agreementAcceptedAt?: string;
   authorizedApprover: string;
   milestones: Milestone[];
+}
+
+export type AgreementStatus = "draft" | "active" | "superseded" | "amendment-requested";
+
+export interface AgreementMilestoneSnapshot {
+  sequenceNumber: number;
+  name: string;
+  description?: string;
+  value: number;
+  acceptanceCriteria: string[];
+}
+
+export interface AgreementContent {
+  title: string;
+  scope: string;
+  terms: string;
+  currency: string;
+  projectValue: number;
+  milestones: AgreementMilestoneSnapshot[];
+}
+
+export interface AgreementAcceptance {
+  id: string;
+  organization: string;
+  acceptedBy: string;
+  acceptedAt: string;
+  reference: string;
+}
+
+export interface AgreementAmendmentRequest {
+  id: string;
+  reason: string;
+  requestedBy: string;
+  requestedAt: string;
+  reference: string;
+}
+
+export interface AgreementVersion {
+  id: string;
+  versionNumber: number;
+  label: string;
+  status: AgreementStatus;
+  content: AgreementContent;
+  contentHash: string;
+  createdAt: string;
+  createdBy: string;
+  acceptance?: AgreementAcceptance;
+  amendmentRequest?: AgreementAmendmentRequest;
+}
+
+export interface CreateAgreementVersionInput {
+  baseVersionId: string;
+  title: string;
+  scope: string;
+  terms: string;
+}
+
+export type AgreementDecisionInput =
+  | { action: "accept"; authorityConfirmed: true; expectedVersionId: string }
+  | { action: "request-amendment"; reason: string; expectedVersionId: string };
+
+export interface AgreementDecisionResult {
+  agreement: AgreementVersion;
+  event: ActivityEvent;
+  replayed?: boolean;
 }
 
 export interface CreateProjectInput {
@@ -91,6 +157,8 @@ export type ActivityType =
   | "customer-invited"
   | "customer-approver-joined"
   | "agreement-accepted"
+  | "agreement-amendment-requested"
+  | "agreement-version-created"
   | "milestone-approved"
   | "evidence-submitted"
   | "changes-requested"
