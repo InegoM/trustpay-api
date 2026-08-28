@@ -17,14 +17,16 @@ export const seedProject: Project = {
   authorizedApprover: "Omar Hassan",
   milestones: [
     {
-      id: 1,
+      id: "30000000-0000-4000-8000-000000000001",
+      sequenceNumber: 1,
       name: "Design and planning",
       value: 18_000,
       status: "approved",
       completedAt: "2026-08-10T11:30:00+04:00",
     },
     {
-      id: 2,
+      id: "30000000-0000-4000-8000-000000000002",
+      sequenceNumber: 2,
       name: "Structural and electrical work",
       value: 45_000,
       status: "awaiting-decision",
@@ -40,7 +42,8 @@ export const seedProject: Project = {
       responseDeadline: "2026-08-27T17:00:00+04:00",
     },
     {
-      id: 3,
+      id: "30000000-0000-4000-8000-000000000003",
+      sequenceNumber: 3,
       name: "Finishing and handover",
       value: 27_000,
       status: "not-started",
@@ -52,7 +55,8 @@ export const seedActivity: ActivityEvent[] = [
   {
     id: "event-1",
     projectId: "cafe-renovation",
-    milestoneId: 2,
+    milestoneId: "30000000-0000-4000-8000-000000000002",
+    milestoneSequenceNumber: 2,
     actor: "Nadia Rahman",
     actorType: "sme",
     occurredAt: "2026-08-20T09:25:00+04:00",
@@ -62,7 +66,8 @@ export const seedActivity: ActivityEvent[] = [
   {
     id: "event-2",
     projectId: "cafe-renovation",
-    milestoneId: 1,
+    milestoneId: "30000000-0000-4000-8000-000000000001",
+    milestoneSequenceNumber: 1,
     actor: "Omar Hassan",
     actorType: "customer",
     occurredAt: "2026-08-10T11:30:00+04:00",

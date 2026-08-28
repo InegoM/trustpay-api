@@ -6,7 +6,8 @@ export type MilestoneStatus =
   | "not-started";
 
 export interface Milestone {
-  id: number;
+  id: string;
+  sequenceNumber: number;
   name: string;
   value: number;
   status: MilestoneStatus;
@@ -99,7 +100,8 @@ export type ActivityType =
 export interface ActivityEvent {
   id: string;
   projectId: string;
-  milestoneId?: number;
+  milestoneId?: string;
+  milestoneSequenceNumber?: number;
   actor: string;
   actorType: "sme" | "customer" | "system";
   occurredAt: string;

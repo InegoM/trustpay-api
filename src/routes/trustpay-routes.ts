@@ -7,7 +7,7 @@ import type { TrustPayRepository } from "../repositories/trustpay-repository.js"
 
 const projectParams = z.object({ projectId: z.string().min(1) });
 const milestoneParams = projectParams.extend({
-  milestoneId: z.coerce.number().int().positive(),
+  milestoneId: z.uuid(),
 });
 const decisionBody = z.discriminatedUnion("action", [
   z.object({ action: z.literal("approve") }).strict(),

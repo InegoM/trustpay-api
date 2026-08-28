@@ -24,7 +24,7 @@ export interface TrustPayRepository {
   listActivity(projectId: string, userId: string): Promise<ActivityEvent[]>;
   recordDecision(
     projectId: string,
-    milestoneId: number,
+    milestoneId: string,
     decision: DecisionInput,
     userId: string,
   ): Promise<DecisionResult>;
