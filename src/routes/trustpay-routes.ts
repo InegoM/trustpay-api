@@ -12,6 +12,7 @@ const milestoneParams = projectParams.extend({
   milestoneId: z.uuid(),
 });
 const submissionParams = milestoneParams.extend({ submissionId: z.uuid() });
+const changeRequestParams = milestoneParams.extend({ changeRequestId: z.uuid() });
 const evidenceParams = submissionParams.extend({ evidenceId: z.uuid() });
 const agreementParams = projectParams.extend({ agreementId: z.uuid() });
 const idempotencyKey = z.string().trim().min(16).max(128).regex(/^[A-Za-z0-9._-]+$/);
@@ -33,6 +34,8 @@ const decisionBody = z.discriminatedUnion("action", [
       reason: z.string().trim().min(3).max(200),
       comment: z.string().trim().min(5).max(2_000),
       responseDate: z.iso.date(),
+      acceptanceCriterionIds: z.array(z.uuid()).max(10).optional(),
+      evidenceItemIds: z.array(z.uuid()).max(10).optional(),
     })
     .strict(),
   z
@@ -90,6 +93,10 @@ const createInvitationBody = z
   .object({ email: z.email().transform((email) => email.trim().toLowerCase()) })
   .strict();
 const submissionNotesBody = z.object({ notes: z.string().trim().max(5_000).optional() }).strict();
+const changeRequestResponseBody = z.object({
+  response: z.string().trim().min(5).max(4_000),
+  notes: z.string().trim().max(5_000).optional(),
+}).strict();
 const evidenceFields = z.object({
   description: z.string().trim().max(2_000).optional(),
   acceptanceCriterionId: z.uuid().optional(),
@@ -268,6 +275,32 @@ export function trustPayRoutes(
       };
     });
 
+    app.get("/projects/:projectId/milestones/:milestoneId/change-requests", async (request) => {
+      const user = await requireUser(request, authService);
+      const params = milestoneParams.safeParse(request.params);
+      if (!params.success) throw validationError(params.error);
+      return { data: await repository.listChangeRequests(params.data.projectId, params.data.milestoneId, user.id) };
+    });
+
+    app.post(
+      "/projects/:projectId/milestones/:milestoneId/change-requests/:changeRequestId/respond",
+      { config: { rateLimit: { max: 10, timeWindow: "1 hour" } } },
+      async (request, reply) => {
+        const user = await requireUser(request, authService);
+        const params = changeRequestParams.safeParse(request.params);
+        if (!params.success) throw validationError(params.error);
+        const body = changeRequestResponseBody.safeParse(request.body);
+        if (!body.success) throw validationError(body.error);
+        const key = idempotencyKey.safeParse(request.headers["idempotency-key"]);
+        if (!key.success) throw new DomainError("An Idempotency-Key header is required", 400, "IDEMPOTENCY_KEY_REQUIRED");
+        const submission = await repository.respondToChangeRequest(
+          params.data.projectId, params.data.milestoneId, params.data.changeRequestId,
+          { response: body.data.response, ...(body.data.notes ? { notes: body.data.notes } : {}) }, user.id, key.data, request.id,
+        );
+        return reply.code(201).send({ data: submission });
+      },
+    );
+
     app.get("/projects/:projectId/milestones/:milestoneId/submissions/:submissionId", async (request) => {
       const user = await requireUser(request, authService);
       const params = submissionParams.safeParse(request.params);
@@ -405,7 +438,13 @@ export function trustPayRoutes(
         const result = await repository.recordDecision(
           params.data.projectId,
           params.data.milestoneId,
-          body.data,
+          body.data.action === "request-changes"
+            ? {
+                ...body.data,
+                ...(body.data.acceptanceCriterionIds ? { acceptanceCriterionIds: body.data.acceptanceCriterionIds } : {}),
+                ...(body.data.evidenceItemIds ? { evidenceItemIds: body.data.evidenceItemIds } : {}),
+              }
+            : body.data,
           user.id,
         );
         return reply.code(201).send({ data: result });

@@ -701,4 +701,46 @@ describe("TrustPay API", () => {
       expect(response.json().error.code).toBe(expectedCode);
     }
   });
+
+  it("preserves a change request and creates a linked resubmission for a new customer decision", async () => {
+    const app = await testApp();
+    const smeCookie = await login(app, "nadia@example.test");
+    const customerCookie = await login(app, "omar@example.test");
+    const milestoneId = "30000000-0000-4000-8000-000000000003";
+    const create = await app.inject({ method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions`, headers: { cookie: smeCookie }, payload: {} });
+    const firstId = create.json().data.id as string;
+    const firstFile = multipartEvidence({}, { name: "before.png", type: "image/png", body: onePixelPng });
+    const uploaded = await app.inject({ method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${firstId}/evidence`, headers: { cookie: smeCookie, "content-type": firstFile.contentType }, payload: firstFile.payload });
+    expect(uploaded.statusCode).toBe(201);
+    expect((await app.inject({ method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${firstId}/submit`, headers: { cookie: smeCookie, "idempotency-key": "m04-first-submit-0001" } })).statusCode).toBe(201);
+    const requested = await app.inject({
+      method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/decisions`, headers: { cookie: customerCookie },
+      payload: { action: "request-changes", reason: "Finishes", comment: "Replace the incomplete finish photographs.", responseDate: "2026-09-15", evidenceItemIds: [uploaded.json().data.id] },
+    });
+    expect(requested.statusCode).toBe(201);
+    const history = await app.inject({ method: "GET", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/change-requests`, headers: { cookie: customerCookie } });
+    expect(history.statusCode).toBe(200);
+    const changeRequest = history.json().data[0];
+    expect(changeRequest).toMatchObject({ reason: "Finishes", evidenceItemIds: [uploaded.json().data.id] });
+    const response = await app.inject({
+      method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/change-requests/${changeRequest.id}/respond`,
+      headers: { cookie: smeCookie, "idempotency-key": "m04-change-response-01" }, payload: { response: "We replaced the photographs and added final evidence." },
+    });
+    expect(response.statusCode).toBe(201);
+    const secondId = response.json().data.id as string;
+    expect(response.json().data).toMatchObject({ submissionNumber: 2, status: "draft", responseToChangeRequest: { changeRequestId: changeRequest.id } });
+    const repeatResponse = await app.inject({
+      method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/change-requests/${changeRequest.id}/respond`,
+      headers: { cookie: smeCookie, "idempotency-key": "m04-change-response-01" }, payload: { response: "We replaced the photographs and added final evidence." },
+    });
+    expect(repeatResponse.json().data.replayed).toBe(true);
+    const secondFile = multipartEvidence({}, { name: "after.png", type: "image/png", body: onePixelPng });
+    expect((await app.inject({ method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${secondId}/evidence`, headers: { cookie: smeCookie, "content-type": secondFile.contentType }, payload: secondFile.payload })).statusCode).toBe(201);
+    expect((await app.inject({ method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${secondId}/submit`, headers: { cookie: smeCookie, "idempotency-key": "m04-second-submit-01" } })).statusCode).toBe(201);
+    const approved = await app.inject({ method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/decisions`, headers: { cookie: customerCookie }, payload: { action: "approve" } });
+    expect(approved.statusCode).toBe(201);
+    const submissions = await app.inject({ method: "GET", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions`, headers: { cookie: customerCookie } });
+    expect(submissions.json().data).toHaveLength(2);
+    expect(submissions.json().data.map((item: { submissionNumber: number }) => item.submissionNumber)).toEqual([2, 1]);
+  });
 });
