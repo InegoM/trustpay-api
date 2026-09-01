@@ -22,20 +22,26 @@
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
     "db:studio": "prisma studio",
-    "db:up": "docker compose up -d postgres",
+    "db:up": "docker compose up -d postgres localstack clamav",
     "db:down": "docker compose down",
     "db:test:up": "docker compose up -d postgres-test",
     "db:test:down": "docker compose stop postgres-test",
     "db:test:deploy": "prisma migrate deploy --config prisma-test.config.ts",
-    "db:test:seed": "prisma db seed --config prisma-test.config.ts"
+    "db:test:seed": "prisma db seed --config prisma-test.config.ts",
+    "storage:cleanup": "tsx scripts/cleanup-evidence.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1121.0",
     "@fastify/cors": "^11.0.0",
+    "@fastify/multipart": "^10.1.1",
+    "@fastify/rate-limit": "^11.2.0",
     "@prisma/adapter-pg": "^7.9.1",
     "@prisma/client": "^7.9.1",
     "dotenv": "^17.0.0",
     "fastify": "^5.0.0",
+    "file-type": "^22.0.2",
     "pg": "8.18.0",
+    "sharp": "^0.35.4",
     "zod": "^4.0.0"
   },
   "devDependencies": {

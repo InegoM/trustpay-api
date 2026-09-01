@@ -3,6 +3,7 @@ import { seedActivity, seedProject } from "../data/seed.js";
 import { DomainError } from "../domain/errors.js";
 import type {
   ActivityEvent,
+  AddEvidenceInput,
   AgreementDecisionInput,
   AgreementDecisionResult,
   AgreementVersion,
@@ -11,7 +12,10 @@ import type {
   CreatedProjectInvitation,
   DecisionInput,
   DecisionResult,
+  EvidenceDownloadRecord,
+  EvidenceItemRecord,
   Milestone,
+  MilestoneSubmissionRecord,
   Project,
   ProjectInvitation,
 } from "../domain/types.js";
@@ -109,6 +113,9 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
     ],
   ]);
   private readonly idempotentAgreementDecisions = new Map<string, { requestHash: string; result: AgreementDecisionResult }>();
+  private readonly idempotentSubmissions = new Map<string, MilestoneSubmissionRecord>();
+  private readonly submissions = new Map<string, MilestoneSubmissionRecord[]>();
+  private readonly evidenceStorageKeys = new Map<string, string>();
 
   async createCustomerInvitation(
     projectId: string,
@@ -284,6 +291,203 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
   ): Promise<AgreementVersion | null> {
     if (!this.allowedUsers.has(userId) || !this.projects.has(projectId)) return null;
     return copy(this.agreements.get(projectId)?.find((agreement) => agreement.id === agreementId) ?? null);
+  }
+
+  async createSubmission(
+    projectId: string,
+    milestoneId: string,
+    notes: string | undefined,
+    userId: string,
+  ): Promise<MilestoneSubmissionRecord> {
+    const project = this.projects.get(projectId);
+    if (!project || !this.allowedUsers.has(userId)) {
+      throw new DomainError("Project not found", 404, "PROJECT_NOT_FOUND");
+    }
+    if (userId !== "20000000-0000-4000-8000-000000000001") {
+      throw new DomainError("Project not found", 404, "PROJECT_NOT_FOUND");
+    }
+    if (project.agreementStatus !== "active" || !project.agreementId) {
+      throw new DomainError("A recorded agreement acceptance is required before evidence can be submitted", 409, "AGREEMENT_NOT_ACCEPTED");
+    }
+    const milestone = project.milestones.find((item) => item.id === milestoneId);
+    if (!milestone) throw new DomainError("Milestone not found", 404, "MILESTONE_NOT_FOUND");
+    const existing = this.submissions.get(milestoneId) ?? [];
+    const draft = existing.find((item) => item.status === "draft");
+    if (draft) return copy(draft);
+    if (existing.some((item) => item.status === "submitted") || !["not-started", "in-progress"].includes(milestone.status)) {
+      throw new DomainError("This milestone cannot receive another evidence package", 409, "MILESTONE_ALREADY_SUBMITTED");
+    }
+    const createdAt = new Date().toISOString();
+    const submission: MilestoneSubmissionRecord = {
+      id: randomUUID(),
+      projectId,
+      milestoneId,
+      milestoneSequenceNumber: milestone.sequenceNumber,
+      milestoneName: milestone.name,
+      submissionNumber: Math.max(0, ...existing.map((item) => item.submissionNumber)) + 1,
+      status: "draft",
+      ...(notes ? { notes } : {}),
+      createdAt,
+      submittedBy: "Nadia Rahman",
+      agreementVersionId: project.agreementId,
+      agreementVersion: project.agreementVersion,
+      evidence: [],
+      canEdit: true,
+    };
+    milestone.status = "in-progress";
+    this.submissions.set(milestoneId, [...existing, submission]);
+    return copy(submission);
+  }
+
+  async updateSubmissionNotes(
+    projectId: string,
+    milestoneId: string,
+    submissionId: string,
+    notes: string | undefined,
+    userId: string,
+  ): Promise<MilestoneSubmissionRecord> {
+    const submission = this.editableSubmission(projectId, milestoneId, submissionId, userId);
+    if (notes) submission.notes = notes;
+    else delete submission.notes;
+    return copy(submission);
+  }
+
+  async listSubmissions(projectId: string, milestoneId: string, userId: string): Promise<MilestoneSubmissionRecord[]> {
+    if (!this.allowedUsers.has(userId) || !this.projects.get(projectId)?.milestones.some((item) => item.id === milestoneId)) {
+      throw new DomainError("Project not found", 404, "PROJECT_NOT_FOUND");
+    }
+    const isSme = userId === "20000000-0000-4000-8000-000000000001";
+    return copy((this.submissions.get(milestoneId) ?? []).filter((item) => isSme || item.status === "submitted"));
+  }
+
+  async findSubmission(
+    projectId: string,
+    milestoneId: string,
+    submissionId: string,
+    userId: string,
+  ): Promise<MilestoneSubmissionRecord | null> {
+    if (!this.allowedUsers.has(userId) || !this.projects.get(projectId)?.milestones.some((item) => item.id === milestoneId)) return null;
+    const item = (this.submissions.get(milestoneId) ?? []).find((submission) => submission.id === submissionId);
+    if (!item || (userId !== "20000000-0000-4000-8000-000000000001" && item.status !== "submitted")) return null;
+    return copy(item);
+  }
+
+  async addEvidence(
+    projectId: string,
+    milestoneId: string,
+    submissionId: string,
+    input: AddEvidenceInput,
+    userId: string,
+  ): Promise<EvidenceItemRecord> {
+    const submission = this.editableSubmission(projectId, milestoneId, submissionId, userId);
+    if (submission.evidence.length >= 10) {
+      throw new DomainError("A submission can contain at most 10 files", 409, "EVIDENCE_FILE_LIMIT_REACHED");
+    }
+    const milestone = this.projects.get(projectId)?.milestones.find((item) => item.id === milestoneId);
+    const criterion = milestone?.acceptanceCriteriaDetailed?.find((item) => item.id === input.acceptanceCriterionId);
+    if (input.acceptanceCriterionId && !criterion) {
+      throw new DomainError("Acceptance criterion not found", 400, "ACCEPTANCE_CRITERION_INVALID");
+    }
+    const evidence: EvidenceItemRecord = {
+      id: randomUUID(),
+      originalName: input.originalName,
+      mimeType: input.mimeType,
+      detectedMimeType: input.detectedMimeType,
+      sizeBytes: input.sizeBytes,
+      sha256: input.sha256,
+      scanStatus: "clean",
+      ...(input.description ? { description: input.description } : {}),
+      ...(input.acceptanceCriterionId ? { acceptanceCriterionId: input.acceptanceCriterionId } : {}),
+      ...(criterion ? { acceptanceCriterion: criterion.description } : {}),
+      uploadedBy: "Nadia Rahman",
+      uploadedAt: new Date().toISOString(),
+      ...(input.capturedAt ? { capturedAt: input.capturedAt.toISOString() } : {}),
+      downloadPath: `/api/v1/projects/${encodeURIComponent(projectId)}/milestones/${milestoneId}/submissions/${submissionId}/evidence/pending/download`,
+    };
+    evidence.downloadPath = evidence.downloadPath.replace("pending", evidence.id);
+    submission.evidence.push(evidence);
+    this.evidenceStorageKeys.set(evidence.id, input.storageKey);
+    return copy(evidence);
+  }
+
+  async removeEvidence(
+    projectId: string,
+    milestoneId: string,
+    submissionId: string,
+    evidenceId: string,
+    userId: string,
+  ): Promise<string> {
+    const submission = this.editableSubmission(projectId, milestoneId, submissionId, userId);
+    const index = submission.evidence.findIndex((item) => item.id === evidenceId);
+    if (index < 0) throw new DomainError("Evidence not found", 404, "EVIDENCE_NOT_FOUND");
+    submission.evidence.splice(index, 1);
+    const key = this.evidenceStorageKeys.get(evidenceId);
+    this.evidenceStorageKeys.delete(evidenceId);
+    if (!key) throw new Error("Evidence storage key is missing");
+    return key;
+  }
+
+  async submitSubmission(
+    projectId: string,
+    milestoneId: string,
+    submissionId: string,
+    userId: string,
+    idempotencyKey: string,
+    _requestId: string,
+  ): Promise<MilestoneSubmissionRecord & { replayed?: boolean }> {
+    const replayKey = `${userId}:${idempotencyKey}`;
+    const replay = this.idempotentSubmissions.get(replayKey);
+    if (replay) return { ...copy(replay), replayed: true };
+    const submission = this.editableSubmission(projectId, milestoneId, submissionId, userId);
+    if (submission.evidence.length === 0) throw new DomainError("Add at least one evidence file before submitting", 409, "EVIDENCE_REQUIRED");
+    const milestone = this.projects.get(projectId)?.milestones.find((item) => item.id === milestoneId);
+    if (!milestone || milestone.status !== "in-progress") {
+      throw new DomainError("This milestone cannot be submitted in its current state", 409, "MILESTONE_NOT_SUBMITTABLE");
+    }
+    const submittedAt = new Date().toISOString();
+    submission.status = "submitted";
+    submission.submittedAt = submittedAt;
+    submission.canEdit = false;
+    milestone.status = "awaiting-decision";
+    milestone.submittedAt = submittedAt;
+    milestone.submittedBy = submission.submittedBy;
+    const event: ActivityEvent = {
+      id: randomUUID(), projectId, milestoneId, milestoneSequenceNumber: milestone.sequenceNumber,
+      actor: "Nadia Rahman", actorType: "sme", occurredAt: submittedAt,
+      description: `Evidence submission ${submission.submissionNumber} recorded for Milestone ${milestone.sequenceNumber} — ${milestone.name}`,
+      type: "evidence-submitted",
+    };
+    this.activity.unshift(event);
+    this.idempotentSubmissions.set(replayKey, copy(submission));
+    return copy(submission);
+  }
+
+  async findEvidenceDownload(
+    projectId: string,
+    milestoneId: string,
+    submissionId: string,
+    evidenceId: string,
+    userId: string,
+  ): Promise<EvidenceDownloadRecord | null> {
+    const submission = await this.findSubmission(projectId, milestoneId, submissionId, userId);
+    const evidence = submission?.evidence.find((item) => item.id === evidenceId && item.scanStatus === "clean");
+    const storageKey = this.evidenceStorageKeys.get(evidenceId);
+    return evidence && storageKey
+      ? { id: evidence.id, storageKey, originalName: evidence.originalName, mimeType: evidence.detectedMimeType, sizeBytes: evidence.sizeBytes, sha256: evidence.sha256 }
+      : null;
+  }
+
+  async listEvidenceStorageKeys(): Promise<string[]> {
+    return [...this.evidenceStorageKeys.values()];
+  }
+
+  private editableSubmission(projectId: string, milestoneId: string, submissionId: string, userId: string): MilestoneSubmissionRecord {
+    if (userId !== "20000000-0000-4000-8000-000000000001" || !this.projects.get(projectId)?.milestones.some((item) => item.id === milestoneId)) {
+      throw new DomainError("Submission not found", 404, "SUBMISSION_NOT_FOUND");
+    }
+    const submission = (this.submissions.get(milestoneId) ?? []).find((item) => item.id === submissionId && item.status === "draft");
+    if (!submission) throw new DomainError("Submission not found", 404, "SUBMISSION_NOT_FOUND");
+    return submission;
   }
 
   async createAgreementVersion(

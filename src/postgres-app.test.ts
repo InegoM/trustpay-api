@@ -381,4 +381,40 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
     });
     await app.close();
   });
+
+  it("enforces submitted evidence immutability inside PostgreSQL", async () => {
+    const project = await prisma.project.findUniqueOrThrow({
+      where: { slug: "cafe-renovation" },
+      include: {
+        agreementVersions: { where: { status: "ACTIVE" }, take: 1 },
+        milestones: { where: { sequenceNumber: 3 }, take: 1 },
+      },
+    });
+    const agreement = project.agreementVersions[0];
+    const milestone = project.milestones[0];
+    if (!agreement || !milestone) throw new Error("M03 seed prerequisites are missing");
+    const nadia = await prisma.user.findUniqueOrThrow({ where: { email: "nadia@example.test" } });
+
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const record = await tx.milestoneSubmission.create({
+          data: {
+            milestoneId: milestone.id,
+            agreementVersionId: agreement.id,
+            submissionNumber: 99,
+            status: "DRAFT",
+            submittedByUserId: nadia.id,
+          },
+        });
+        await tx.milestoneSubmission.update({
+          where: { id: record.id },
+          data: { status: "SUBMITTED", submittedAt: new Date() },
+        });
+        await tx.milestoneSubmission.update({
+          where: { id: record.id },
+          data: { notes: "This mutation must be rejected" },
+        });
+      }),
+    ).rejects.toThrow(/submitted evidence packages are immutable/);
+  });
 });

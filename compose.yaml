@@ -35,6 +35,42 @@ services:
       timeout: 5s
       retries: 10
 
+  localstack:
+    image: localstack/localstack:4.14.0
+    container_name: trustpay-localstack
+    restart: unless-stopped
+    environment:
+      SERVICES: s3
+      PERSISTENCE: "1"
+      DEBUG: "0"
+    ports:
+      - "127.0.0.1:59000:4566"
+    volumes:
+      - trustpay-localstack-data:/var/lib/localstack
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init-s3.sh:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  clamav:
+    image: clamav/clamav:1.4
+    container_name: trustpay-clamav
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:53310:3310"
+    volumes:
+      - trustpay-clamav-data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      start_period: 90s
+
 volumes:
   trustpay-postgres-data:
   trustpay-postgres-test-data:
+  trustpay-localstack-data:
+  trustpay-clamav-data:

@@ -3,15 +3,18 @@ import {
   ActivityType as DbActivityType,
   AgreementStatus as DbAgreementStatus,
   DecisionAction,
+  EvidenceScanStatus as DbEvidenceScanStatus,
   MilestoneStatus as DbMilestoneStatus,
   Prisma,
   ProjectPartyRole,
   ProjectStatus as DbProjectStatus,
+  SubmissionStatus as DbSubmissionStatus,
 } from "../generated/prisma/client.js";
 import { DomainError } from "../domain/errors.js";
 import type {
   ActivityEvent,
   ActivityType,
+  AddEvidenceInput,
   AgreementContent,
   AgreementDecisionInput,
   AgreementDecisionResult,
@@ -22,11 +25,18 @@ import type {
   CreatedProjectInvitation,
   DecisionInput,
   DecisionResult,
+  EvidenceDownloadRecord,
+  EvidenceItemRecord,
   Milestone,
+  MilestoneSubmissionRecord,
   MilestoneStatus,
   Project,
   ProjectInvitation,
 } from "../domain/types.js";
+import {
+  DEFAULT_MAX_FILES_PER_SUBMISSION,
+  DEFAULT_ORGANIZATION_STORAGE_BYTES,
+} from "../storage/file-validation.js";
 import type { TrustPayPrismaClient } from "../database/prisma.js";
 import type { TrustPayRepository } from "./trustpay-repository.js";
 
@@ -46,6 +56,7 @@ const projectInclude = {
     include: {
       acceptanceCriteria: { orderBy: { position: "asc" } },
       submissions: {
+        where: { status: DbSubmissionStatus.SUBMITTED },
         orderBy: { submissionNumber: "desc" },
         take: 1,
         include: { submittedBy: true },
@@ -66,6 +77,16 @@ const agreementInclude = {
   },
 } as const satisfies Prisma.AgreementVersionInclude;
 
+const submissionInclude = {
+  milestone: { include: { project: true } },
+  agreementVersion: true,
+  submittedBy: true,
+  evidenceItems: {
+    include: { uploadedBy: true, acceptanceCriterion: true },
+    orderBy: { uploadedAt: "asc" },
+  },
+} as const satisfies Prisma.MilestoneSubmissionInclude;
+
 type ProjectRow = Prisma.ProjectGetPayload<{ include: typeof projectInclude }>;
 
 function money(value: bigint): number {
@@ -82,6 +103,7 @@ function milestoneStatus(status: DbMilestoneStatus): MilestoneStatus {
     AWAITING_DECISION: "awaiting-decision",
     CHANGES_REQUESTED: "changes-requested",
     DISPUTED: "disputed",
+    IN_PROGRESS: "in-progress",
     NOT_STARTED: "not-started",
   };
   return statuses[status];
@@ -254,8 +276,13 @@ function mapProject(row: ProjectRow): Project {
         acceptanceCriteria: milestone.acceptanceCriteria.map(
           (criterion) => criterion.description,
         ),
+        acceptanceCriteriaDetailed: milestone.acceptanceCriteria.map((criterion) => ({
+          id: criterion.id,
+          position: criterion.position,
+          description: criterion.description,
+        })),
         ...(submission ? { submittedBy: submission.submittedBy.displayName } : {}),
-        ...(submission ? { submittedAt: submission.submittedAt.toISOString() } : {}),
+        ...(submission?.submittedAt ? { submittedAt: submission.submittedAt.toISOString() } : {}),
         ...(milestone.responseDeadline
           ? { responseDeadline: milestone.responseDeadline.toISOString() }
           : {}),
@@ -368,6 +395,55 @@ function projectAccess(userId: string): Prisma.ProjectWhereInput[] {
       },
     },
   ];
+}
+
+type SubmissionRow = Prisma.MilestoneSubmissionGetPayload<{
+  include: typeof submissionInclude;
+}>;
+
+function evidenceScanStatus(status: DbEvidenceScanStatus): EvidenceItemRecord["scanStatus"] {
+  return status.toLowerCase() as EvidenceItemRecord["scanStatus"];
+}
+
+function mapEvidence(row: SubmissionRow["evidenceItems"][number], projectSlug: string, milestoneId: string): EvidenceItemRecord {
+  const sizeBytes = Number(row.sizeBytes);
+  if (!Number.isSafeInteger(sizeBytes)) throw new Error("Evidence size exceeds JavaScript's safe integer range");
+  return {
+    id: row.id,
+    originalName: row.originalName,
+    mimeType: row.mimeType,
+    detectedMimeType: row.detectedMimeType,
+    sizeBytes,
+    sha256: row.sha256,
+    scanStatus: evidenceScanStatus(row.scanStatus),
+    ...(row.description ? { description: row.description } : {}),
+    ...(row.acceptanceCriterionId ? { acceptanceCriterionId: row.acceptanceCriterionId } : {}),
+    ...(row.acceptanceCriterion ? { acceptanceCriterion: row.acceptanceCriterion.description } : {}),
+    uploadedBy: row.uploadedBy.displayName,
+    uploadedAt: row.uploadedAt.toISOString(),
+    ...(row.capturedAt ? { capturedAt: row.capturedAt.toISOString() } : {}),
+    downloadPath: `/api/v1/projects/${encodeURIComponent(projectSlug)}/milestones/${milestoneId}/submissions/${row.submissionId}/evidence/${row.id}/download`,
+  };
+}
+
+function mapSubmission(row: SubmissionRow, canEdit: boolean): MilestoneSubmissionRecord {
+  return {
+    id: row.id,
+    projectId: row.milestone.project.slug,
+    milestoneId: row.milestoneId,
+    milestoneSequenceNumber: row.milestone.sequenceNumber,
+    milestoneName: row.milestone.name,
+    submissionNumber: row.submissionNumber,
+    status: row.status === DbSubmissionStatus.SUBMITTED ? "submitted" : "draft",
+    ...(row.notes ? { notes: row.notes } : {}),
+    createdAt: row.createdAt.toISOString(),
+    ...(row.submittedAt ? { submittedAt: row.submittedAt.toISOString() } : {}),
+    submittedBy: row.submittedBy.displayName,
+    agreementVersionId: row.agreementVersionId,
+    agreementVersion: agreementVersionLabel(row.agreementVersion.versionNumber),
+    evidence: row.evidenceItems.map((item) => mapEvidence(item, row.milestone.project.slug, row.milestoneId)),
+    canEdit: canEdit && row.status === DbSubmissionStatus.DRAFT,
+  };
 }
 
 export default class PostgresTrustPayRepository implements TrustPayRepository {
@@ -671,6 +747,490 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
     return agreement ? mapAgreement(agreement) : null;
   }
 
+  async createSubmission(
+    projectId: string,
+    milestoneId: string,
+    notes: string | undefined,
+    userId: string,
+  ): Promise<MilestoneSubmissionRecord> {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const project = await tx.project.findFirst({
+          where: {
+            slug: projectId,
+            owningOrganization: {
+              memberships: { some: { userId, role: { in: ["OWNER", "ADMIN"] } } },
+            },
+          },
+          include: {
+            agreementVersions: {
+              where: { status: DbAgreementStatus.ACTIVE },
+              include: { acceptances: true },
+            },
+            milestones: { where: { id: milestoneId }, include: { submissions: true } },
+          },
+        });
+        if (!project) throw new DomainError("Project not found", 404, "PROJECT_NOT_FOUND");
+        const milestone = project.milestones[0];
+        if (!milestone) throw new DomainError("Milestone not found", 404, "MILESTONE_NOT_FOUND");
+        const agreement = project.agreementVersions.find((item) => item.acceptances.length > 0);
+        if (!agreement) {
+          throw new DomainError(
+            "A recorded agreement acceptance is required before evidence can be submitted",
+            409,
+            "AGREEMENT_NOT_ACCEPTED",
+          );
+        }
+        const existingDraft = milestone.submissions.find((item) => item.status === DbSubmissionStatus.DRAFT);
+        if (existingDraft) {
+          return mapSubmission(
+            await tx.milestoneSubmission.findUniqueOrThrow({
+              where: { id: existingDraft.id },
+              include: submissionInclude,
+            }),
+            true,
+          );
+        }
+        if (milestone.submissions.some((item) => item.status === DbSubmissionStatus.SUBMITTED)) {
+          throw new DomainError(
+            "This milestone already has a submitted evidence package",
+            409,
+            "MILESTONE_ALREADY_SUBMITTED",
+          );
+        }
+        if (milestone.status !== DbMilestoneStatus.NOT_STARTED && milestone.status !== DbMilestoneStatus.IN_PROGRESS) {
+          throw new DomainError(
+            "This milestone cannot receive a new evidence submission in its current state",
+            409,
+            "MILESTONE_NOT_SUBMITTABLE",
+          );
+        }
+        const latest = await tx.milestoneSubmission.aggregate({
+          where: { milestoneId: milestone.id },
+          _max: { submissionNumber: true },
+        });
+        const created = await tx.milestoneSubmission.create({
+          data: {
+            milestoneId: milestone.id,
+            agreementVersionId: agreement.id,
+            submissionNumber: (latest._max.submissionNumber ?? 0) + 1,
+            submittedByUserId: userId,
+            ...(notes ? { notes } : {}),
+          },
+          include: submissionInclude,
+        });
+        if (milestone.status === DbMilestoneStatus.NOT_STARTED) {
+          await tx.milestone.update({
+            where: { id: milestone.id },
+            data: { status: DbMilestoneStatus.IN_PROGRESS },
+          });
+        }
+        return mapSubmission(created, true);
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === "P2002" || error.code === "P2034")) {
+        throw new DomainError("A submission was created concurrently; retry safely", 409, "SUBMISSION_CONFLICT");
+      }
+      throw error;
+    }
+  }
+
+  async updateSubmissionNotes(
+    projectId: string,
+    milestoneId: string,
+    submissionId: string,
+    notes: string | undefined,
+    userId: string,
+  ): Promise<MilestoneSubmissionRecord> {
+    const submission = await this.prisma.milestoneSubmission.findFirst({
+      where: {
+        id: submissionId,
+        milestoneId,
+        status: DbSubmissionStatus.DRAFT,
+        milestone: {
+          project: {
+            slug: projectId,
+            owningOrganization: {
+              memberships: { some: { userId, role: { in: ["OWNER", "ADMIN"] } } },
+            },
+          },
+        },
+      },
+      select: { id: true },
+    });
+    if (!submission) throw new DomainError("Submission not found", 404, "SUBMISSION_NOT_FOUND");
+    return mapSubmission(
+      await this.prisma.milestoneSubmission.update({
+        where: { id: submission.id },
+        data: { notes: notes || null },
+        include: submissionInclude,
+      }),
+      true,
+    );
+  }
+
+  async listSubmissions(
+    projectId: string,
+    milestoneId: string,
+    userId: string,
+  ): Promise<MilestoneSubmissionRecord[]> {
+    const project = await this.prisma.project.findFirst({
+      where: { slug: projectId, OR: projectAccess(userId) },
+      select: {
+        id: true,
+        owningOrganization: {
+          select: { memberships: { where: { userId }, select: { role: true } } },
+        },
+        milestones: { where: { id: milestoneId }, select: { id: true } },
+      },
+    });
+    if (!project) throw new DomainError("Project not found", 404, "PROJECT_NOT_FOUND");
+    if (!project.milestones[0]) throw new DomainError("Milestone not found", 404, "MILESTONE_NOT_FOUND");
+    const canEdit = project.owningOrganization.memberships.some((membership) =>
+      ["OWNER", "ADMIN"].includes(membership.role),
+    );
+    const rows = await this.prisma.milestoneSubmission.findMany({
+      where: {
+        milestoneId,
+        ...(!canEdit ? { status: DbSubmissionStatus.SUBMITTED } : {}),
+      },
+      include: submissionInclude,
+      orderBy: { submissionNumber: "desc" },
+    });
+    return rows.map((row) => mapSubmission(row, canEdit));
+  }
+
+  async findSubmission(
+    projectId: string,
+    milestoneId: string,
+    submissionId: string,
+    userId: string,
+  ): Promise<MilestoneSubmissionRecord | null> {
+    const project = await this.prisma.project.findFirst({
+      where: { slug: projectId, OR: projectAccess(userId) },
+      select: {
+        id: true,
+        owningOrganization: {
+          select: { memberships: { where: { userId }, select: { role: true } } },
+        },
+        milestones: { where: { id: milestoneId }, select: { id: true } },
+      },
+    });
+    if (!project || !project.milestones[0]) return null;
+    const canEdit = project.owningOrganization.memberships.some((membership) =>
+      ["OWNER", "ADMIN"].includes(membership.role),
+    );
+    const row = await this.prisma.milestoneSubmission.findFirst({
+      where: {
+        id: submissionId,
+        milestoneId,
+        ...(!canEdit ? { status: DbSubmissionStatus.SUBMITTED } : {}),
+      },
+      include: submissionInclude,
+    });
+    return row ? mapSubmission(row, canEdit) : null;
+  }
+
+  async addEvidence(
+    projectId: string,
+    milestoneId: string,
+    submissionId: string,
+    input: AddEvidenceInput,
+    userId: string,
+  ): Promise<EvidenceItemRecord> {
+    return this.prisma.$transaction(async (tx) => {
+      const submission = await tx.milestoneSubmission.findFirst({
+        where: {
+          id: submissionId,
+          milestoneId,
+          status: DbSubmissionStatus.DRAFT,
+          milestone: {
+            project: {
+              slug: projectId,
+              owningOrganization: {
+                memberships: { some: { userId, role: { in: ["OWNER", "ADMIN"] } } },
+              },
+            },
+          },
+        },
+        include: {
+          milestone: { include: { project: true, acceptanceCriteria: true } },
+          evidenceItems: { select: { id: true } },
+        },
+      });
+      if (!submission) throw new DomainError("Submission not found", 404, "SUBMISSION_NOT_FOUND");
+      if (submission.evidenceItems.length >= DEFAULT_MAX_FILES_PER_SUBMISSION) {
+        throw new DomainError(
+          `A submission can contain at most ${DEFAULT_MAX_FILES_PER_SUBMISSION} files`,
+          409,
+          "EVIDENCE_FILE_LIMIT_REACHED",
+        );
+      }
+      if (
+        input.acceptanceCriterionId &&
+        !submission.milestone.acceptanceCriteria.some((criterion) => criterion.id === input.acceptanceCriterionId)
+      ) {
+        throw new DomainError("Acceptance criterion not found", 400, "ACCEPTANCE_CRITERION_INVALID");
+      }
+      const stored = await tx.evidenceItem.aggregate({
+        where: {
+          submission: {
+            milestone: { project: { owningOrganizationId: submission.milestone.project.owningOrganizationId } },
+          },
+        },
+        _sum: { sizeBytes: true },
+      });
+      if ((stored._sum.sizeBytes ?? 0n) + BigInt(input.sizeBytes) > BigInt(DEFAULT_ORGANIZATION_STORAGE_BYTES)) {
+        throw new DomainError("Organization evidence storage quota reached", 413, "ORGANIZATION_STORAGE_QUOTA_REACHED");
+      }
+      const created = await tx.evidenceItem.create({
+        data: {
+          submissionId,
+          uploadedByUserId: userId,
+          storageKey: input.storageKey,
+          originalName: input.originalName,
+          mimeType: input.mimeType,
+          detectedMimeType: input.detectedMimeType,
+          sizeBytes: BigInt(input.sizeBytes),
+          sha256: input.sha256,
+          scanStatus: DbEvidenceScanStatus.CLEAN,
+          validatedAt: new Date(),
+          ...(input.acceptanceCriterionId ? { acceptanceCriterionId: input.acceptanceCriterionId } : {}),
+          ...(input.description ? { description: input.description } : {}),
+          ...(input.capturedAt ? { capturedAt: input.capturedAt } : {}),
+        },
+      });
+      const refreshed = await tx.milestoneSubmission.findUniqueOrThrow({
+        where: { id: submissionId },
+        include: submissionInclude,
+      });
+      const mapped = refreshed.evidenceItems.find((item) => item.id === created.id);
+      if (!mapped) throw new Error("Created evidence could not be loaded");
+      return mapEvidence(mapped, projectId, milestoneId);
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
+
+  async removeEvidence(
+    projectId: string,
+    milestoneId: string,
+    submissionId: string,
+    evidenceId: string,
+    userId: string,
+  ): Promise<string> {
+    return this.prisma.$transaction(async (tx) => {
+      const evidence = await tx.evidenceItem.findFirst({
+        where: {
+          id: evidenceId,
+          submissionId,
+          submission: {
+            milestoneId,
+            status: DbSubmissionStatus.DRAFT,
+            milestone: {
+              project: {
+                slug: projectId,
+                owningOrganization: {
+                  memberships: { some: { userId, role: { in: ["OWNER", "ADMIN"] } } },
+                },
+              },
+            },
+          },
+        },
+      });
+      if (!evidence) throw new DomainError("Evidence not found", 404, "EVIDENCE_NOT_FOUND");
+      await tx.evidenceItem.delete({ where: { id: evidence.id } });
+      return evidence.storageKey;
+    });
+  }
+
+  async submitSubmission(
+    projectId: string,
+    milestoneId: string,
+    submissionId: string,
+    userId: string,
+    idempotencyKey: string,
+    requestId: string,
+  ): Promise<MilestoneSubmissionRecord & { replayed?: boolean }> {
+    const scope = `evidence-submit:${userId}`;
+    const requestHash = createHash("sha256").update(`${projectId}:${milestoneId}:${submissionId}`).digest("hex");
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const existingKey = await tx.idempotencyKey.findUnique({
+          where: { scope_key: { scope, key: idempotencyKey } },
+        });
+        if (existingKey) {
+          if (existingKey.requestHash !== requestHash) {
+            throw new DomainError("This idempotency key was used for another request", 409, "IDEMPOTENCY_KEY_REUSED");
+          }
+          if (existingKey.responseBody) {
+            return { ...(existingKey.responseBody as unknown as MilestoneSubmissionRecord), replayed: true };
+          }
+          throw new DomainError("This submission is already being processed", 409, "IDEMPOTENCY_IN_PROGRESS");
+        }
+        await tx.idempotencyKey.create({
+          data: {
+            userId,
+            scope,
+            key: idempotencyKey,
+            requestHash,
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+          },
+        });
+        const submission = await tx.milestoneSubmission.findFirst({
+          where: {
+            id: submissionId,
+            milestoneId,
+            status: DbSubmissionStatus.DRAFT,
+            milestone: {
+              project: {
+                slug: projectId,
+                owningOrganization: {
+                  memberships: { some: { userId, role: { in: ["OWNER", "ADMIN"] } } },
+                },
+              },
+            },
+          },
+          include: {
+            milestone: { include: { project: { include: { parties: true } } } },
+            agreementVersion: { include: { acceptances: true } },
+            evidenceItems: true,
+            submittedBy: true,
+          },
+        });
+        if (!submission) throw new DomainError("Submission not found", 404, "SUBMISSION_NOT_FOUND");
+        if (submission.agreementVersion.status !== DbAgreementStatus.ACTIVE || submission.agreementVersion.acceptances.length === 0) {
+          throw new DomainError("The governing agreement is not active", 409, "AGREEMENT_NOT_ACCEPTED");
+        }
+        if (submission.evidenceItems.length === 0) {
+          throw new DomainError("Add at least one evidence file before submitting", 409, "EVIDENCE_REQUIRED");
+        }
+        if (submission.evidenceItems.some((item) => item.scanStatus !== DbEvidenceScanStatus.CLEAN)) {
+          throw new DomainError("Every evidence file must pass validation before submission", 409, "EVIDENCE_NOT_READY");
+        }
+        const submittedAt = new Date();
+        const updated = await tx.milestoneSubmission.updateMany({
+          where: { id: submission.id, status: DbSubmissionStatus.DRAFT },
+          data: { status: DbSubmissionStatus.SUBMITTED, submittedAt },
+        });
+        if (updated.count !== 1) throw new DomainError("This submission is no longer editable", 409, "SUBMISSION_ALREADY_FINALIZED");
+        const milestoneUpdated = await tx.milestone.updateMany({
+          where: { id: milestoneId, status: DbMilestoneStatus.IN_PROGRESS },
+          data: { status: DbMilestoneStatus.AWAITING_DECISION },
+        });
+        if (milestoneUpdated.count !== 1) {
+          throw new DomainError("This milestone cannot be submitted in its current state", 409, "MILESTONE_NOT_SUBMITTABLE");
+        }
+        const reference = `TP-EVD-${randomUUID().slice(0, 8)}`.toUpperCase();
+        await tx.activityEvent.create({
+          data: {
+            projectId: submission.milestone.project.id,
+            milestoneId,
+            actorUserId: userId,
+            actorOrganizationId: submission.milestone.project.owningOrganizationId,
+            actorName: submission.submittedBy.displayName,
+            actorType: "sme",
+            type: DbActivityType.EVIDENCE_SUBMITTED,
+            description: `Evidence submission ${submission.submissionNumber} recorded for Milestone ${submission.milestone.sequenceNumber} — ${submission.milestone.name}`,
+            reference,
+            payload: {
+              submissionId,
+              agreementVersionId: submission.agreementVersionId,
+              evidenceCount: submission.evidenceItems.length,
+              resultingState: "AWAITING_DECISION",
+              requestId,
+              actorRole: "SME_ADMIN",
+              source: "web",
+            },
+          },
+        });
+        await tx.outboxEvent.create({
+          data: {
+            aggregateType: "submission",
+            aggregateId: submissionId,
+            eventType: DbActivityType.EVIDENCE_SUBMITTED,
+            payload: { projectId, milestoneId, submissionId, reference },
+          },
+        });
+        const customer = submission.milestone.project.parties.find((party) => party.role === ProjectPartyRole.CUSTOMER);
+        if (customer) {
+          await tx.notification.create({
+            data: {
+              organizationId: customer.organizationId,
+              ...(customer.authorizedApproverUserId ? { userId: customer.authorizedApproverUserId } : {}),
+              channel: "in-app",
+              subject: `Evidence ready for Milestone ${submission.milestone.sequenceNumber}`,
+              body: `Submission ${submission.submissionNumber} is ready for review.`,
+            },
+          });
+        }
+        const refreshed = await tx.milestoneSubmission.findUniqueOrThrow({
+          where: { id: submissionId },
+          include: submissionInclude,
+        });
+        const result = mapSubmission(refreshed, false);
+        await tx.idempotencyKey.update({
+          where: { scope_key: { scope, key: idempotencyKey } },
+          data: { responseStatus: 201, responseBody: result as unknown as Prisma.InputJsonValue },
+        });
+        return result;
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === "P2002" || error.code === "P2034")) {
+        throw new DomainError("This submission changed before completion", 409, "SUBMISSION_CONFLICT");
+      }
+      throw error;
+    }
+  }
+
+  async findEvidenceDownload(
+    projectId: string,
+    milestoneId: string,
+    submissionId: string,
+    evidenceId: string,
+    userId: string,
+  ): Promise<EvidenceDownloadRecord | null> {
+    const project = await this.prisma.project.findFirst({
+      where: { slug: projectId, OR: projectAccess(userId) },
+      select: {
+        id: true,
+        owningOrganization: {
+          select: { memberships: { where: { userId }, select: { role: true } } },
+        },
+      },
+    });
+    if (!project) return null;
+    const canReadDraft = project.owningOrganization.memberships.some((membership) =>
+      ["OWNER", "ADMIN"].includes(membership.role),
+    );
+    const evidence = await this.prisma.evidenceItem.findFirst({
+      where: {
+        id: evidenceId,
+        submissionId,
+        scanStatus: DbEvidenceScanStatus.CLEAN,
+        submission: {
+          milestoneId,
+          ...(!canReadDraft ? { status: DbSubmissionStatus.SUBMITTED } : {}),
+          milestone: { projectId: project.id },
+        },
+      },
+    });
+    if (!evidence) return null;
+    const sizeBytes = Number(evidence.sizeBytes);
+    if (!Number.isSafeInteger(sizeBytes)) throw new Error("Evidence size exceeds JavaScript's safe integer range");
+    return {
+      id: evidence.id,
+      storageKey: evidence.storageKey,
+      originalName: evidence.originalName,
+      mimeType: evidence.detectedMimeType,
+      sizeBytes,
+      sha256: evidence.sha256,
+    };
+  }
+
+  async listEvidenceStorageKeys(): Promise<string[]> {
+    const rows = await this.prisma.evidenceItem.findMany({ select: { storageKey: true } });
+    return rows.map((row) => row.storageKey);
+  }
+
   async createAgreementVersion(
     projectId: string,
     input: CreateAgreementVersionInput,
@@ -924,6 +1484,7 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
               where: { id: milestoneId },
               include: {
                 submissions: {
+                  where: { status: DbSubmissionStatus.SUBMITTED },
                   orderBy: { submissionNumber: "desc" },
                   take: 1,
                 },

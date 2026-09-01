@@ -11,7 +11,7 @@ The M00 baseline was recorded on 2026-08-26. Its architecture, security-control 
 - Node.js 22 (Mise configuration: `.mise.toml`)
 - npm 10.9.2 (`packageManager` in `package.json`)
 - Docker Desktop with Compose v2
-- PostgreSQL 18.3, supplied by `compose.yaml`
+- PostgreSQL 18.3, LocalStack S3, and ClamAV, supplied by `compose.yaml`
 
 Use the committed lockfile with `npm ci`; do not substitute `npm install` for repeatable checks or CI.
 
@@ -37,8 +37,14 @@ The development API listens at `http://127.0.0.1:3001` by default. It allows cre
 | `WEB_ORIGIN` | `http://localhost:8443` | Allowed browser origin |
 | `DATABASE_URL` | local port `55432`, database `trustpay` | Development database |
 | `TEST_DATABASE_URL` | local port `55433`, database `trustpay_test` | Isolated automated-test database |
+| `STORAGE_ENDPOINT` | `http://127.0.0.1:59000` | Local S3-compatible endpoint; omit for AWS S3 |
+| `STORAGE_BUCKET` | `trustpay-evidence` | Private evidence bucket |
+| `STORAGE_SERVER_SIDE_ENCRYPTION` | `AES256` | S3 server-side encryption mode |
+| `CLAMAV_HOST` / `CLAMAV_PORT` | `127.0.0.1:53310` | Private malware-scanner service |
+| `ABANDONED_UPLOAD_RETENTION_HOURS` | `24` | Cleanup age for unreferenced objects |
 
 `GET /health` is the local health endpoint. It does not authenticate and returns no customer data.
+M03 storage design, production prerequisites, cleanup, and recovery behavior are documented in [docs/m03-evidence-storage.md](docs/m03-evidence-storage.md).
 
 ## Database commands
 
@@ -86,6 +92,19 @@ npm run security:password-benchmark
 - `GET /api/v1/projects/:projectId`
 - `GET /api/v1/projects/:projectId/activity`
 - `GET /api/v1/projects/:projectId/invitations`
+- `POST /api/v1/projects/:projectId/invitations`
+- `GET /api/v1/projects/:projectId/agreements`
+- `GET /api/v1/projects/:projectId/agreements/:agreementId`
+- `POST /api/v1/projects/:projectId/agreements`
+- `POST /api/v1/projects/:projectId/agreements/:agreementId/decisions`
+- `POST /api/v1/projects/:projectId/milestones/:milestoneId/submissions`
+- `GET /api/v1/projects/:projectId/milestones/:milestoneId/submissions`
+- `GET /api/v1/projects/:projectId/milestones/:milestoneId/submissions/:submissionId`
+- `PATCH /api/v1/projects/:projectId/milestones/:milestoneId/submissions/:submissionId`
+- `POST /api/v1/projects/:projectId/milestones/:milestoneId/submissions/:submissionId/evidence`
+- `DELETE /api/v1/projects/:projectId/milestones/:milestoneId/submissions/:submissionId/evidence/:evidenceId`
+- `GET /api/v1/projects/:projectId/milestones/:milestoneId/submissions/:submissionId/evidence/:evidenceId/download`
+- `POST /api/v1/projects/:projectId/milestones/:milestoneId/submissions/:submissionId/submit`
 - `POST /api/v1/projects/:projectId/milestones/:milestoneId/decisions`
 
 All endpoints except health, login, and invitation acceptance require a server-managed HTTP-only session cookie. Project data is scoped on the server to the authenticated user's organization memberships; unrelated organizations receive a safe `404` for a project outside their scope.

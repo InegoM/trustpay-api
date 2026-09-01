@@ -274,18 +274,41 @@ async function main() {
     });
   }
 
-  await prisma.milestoneSubmission.upsert({
+  const handoverCriteria = [
+    "Finishes match the approved schedule",
+    "Handover documents are complete",
+  ];
+  for (const [index, description] of handoverCriteria.entries()) {
+    await prisma.acceptanceCriterion.upsert({
+      where: {
+        milestoneId_position: {
+          milestoneId: ids.milestone3,
+          position: index + 1,
+        },
+      },
+      update: { description },
+      create: { milestoneId: ids.milestone3, position: index + 1, description },
+    });
+  }
+
+  const seededSubmission = await prisma.milestoneSubmission.findUnique({
     where: { id: ids.submission },
-    update: { notes: "Initial evidence package for customer review" },
-    create: {
+    select: { id: true },
+  });
+  if (!seededSubmission) {
+    await prisma.milestoneSubmission.create({
+      data: {
       id: ids.submission,
       milestoneId: ids.milestone2,
+      agreementVersionId: ids.agreement,
       submissionNumber: 1,
+      status: "SUBMITTED",
       submittedByUserId: ids.nadia,
-      notes: "Initial evidence package for customer review",
+      notes: "Initial synthetic submission record for decision-flow tests",
       submittedAt: new Date("2026-08-20T09:25:00+04:00"),
-    },
-  });
+      },
+    });
+  }
 
   await prisma.activityEvent.upsert({
     where: { id: "70000000-0000-4000-8000-000000000001" },
