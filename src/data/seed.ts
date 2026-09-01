@@ -38,6 +38,11 @@ export const seedProject: Project = {
         "Electrical and plumbing rough-in is complete",
         "Submitted evidence clearly shows completed work",
       ],
+      acceptanceCriteriaDetailed: [
+        { id: "31000000-0000-4000-8000-000000000001", position: 1, description: "Structural partitions match the approved layout" },
+        { id: "31000000-0000-4000-8000-000000000002", position: 2, description: "Electrical and plumbing rough-in is complete" },
+        { id: "31000000-0000-4000-8000-000000000003", position: 3, description: "Submitted evidence clearly shows completed work" },
+      ],
       submittedBy: "Alba Fit-Out",
       submittedAt: "2026-08-20T09:25:00+04:00",
       responseDeadline: "2026-08-27T17:00:00+04:00",
@@ -48,6 +53,11 @@ export const seedProject: Project = {
       name: "Finishing and handover",
       value: 27_000,
       status: "not-started",
+      acceptanceCriteria: ["Finishes match the approved schedule", "Handover documents are complete"],
+      acceptanceCriteriaDetailed: [
+        { id: "31000000-0000-4000-8000-000000000004", position: 1, description: "Finishes match the approved schedule" },
+        { id: "31000000-0000-4000-8000-000000000005", position: 2, description: "Handover documents are complete" },
+      ],
     },
   ],
 };

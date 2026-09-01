@@ -3,7 +3,14 @@ export type MilestoneStatus =
   | "awaiting-decision"
   | "changes-requested"
   | "disputed"
+  | "in-progress"
   | "not-started";
+
+export interface AcceptanceCriterionView {
+  id: string;
+  position: number;
+  description: string;
+}
 
 export interface Milestone {
   id: string;
@@ -13,10 +20,70 @@ export interface Milestone {
   status: MilestoneStatus;
   description?: string;
   acceptanceCriteria?: string[];
+  acceptanceCriteriaDetailed?: AcceptanceCriterionView[];
   submittedBy?: string;
   submittedAt?: string;
   responseDeadline?: string;
   completedAt?: string;
+}
+
+export type SubmissionStatus = "draft" | "submitted";
+export type EvidenceScanStatus = "pending" | "clean" | "infected" | "error";
+
+export interface EvidenceItemRecord {
+  id: string;
+  originalName: string;
+  mimeType: string;
+  detectedMimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  scanStatus: EvidenceScanStatus;
+  description?: string;
+  acceptanceCriterionId?: string;
+  acceptanceCriterion?: string;
+  uploadedBy: string;
+  uploadedAt: string;
+  capturedAt?: string;
+  downloadPath: string;
+}
+
+export interface MilestoneSubmissionRecord {
+  id: string;
+  projectId: string;
+  milestoneId: string;
+  milestoneSequenceNumber: number;
+  milestoneName: string;
+  submissionNumber: number;
+  status: SubmissionStatus;
+  notes?: string;
+  createdAt: string;
+  submittedAt?: string;
+  submittedBy: string;
+  agreementVersionId: string;
+  agreementVersion: string;
+  evidence: EvidenceItemRecord[];
+  canEdit: boolean;
+}
+
+export interface AddEvidenceInput {
+  acceptanceCriterionId?: string;
+  storageKey: string;
+  originalName: string;
+  mimeType: string;
+  detectedMimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  description?: string;
+  capturedAt?: Date;
+}
+
+export interface EvidenceDownloadRecord {
+  id: string;
+  storageKey: string;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
 }
 
 export interface Project {

@@ -1,14 +1,49 @@
 import { afterEach, describe, expect, it } from "vitest";
+import sharp from "sharp";
 import createApp from "./app.js";
+import EvidenceService from "./evidence/evidence-service.js";
 import InMemoryTrustPayRepository from "./repositories/in-memory-trustpay-repository.js";
 import InMemoryAuthService from "./auth/in-memory-auth-service.js";
+import type { MalwareScanner } from "./storage/malware-scanner.js";
+import { AllowAllTestScanner } from "./storage/malware-scanner.js";
+import { InMemoryObjectStorage } from "./storage/object-storage.js";
 
 const apps: Awaited<ReturnType<typeof createApp>>[] = [];
 
-async function testApp() {
+function multipartEvidence(
+  fields: Record<string, string>,
+  file: { name: string; type: string; body: Buffer },
+): { payload: Buffer; contentType: string } {
+  const boundary = "----trustpay-test-boundary";
+  const chunks: Buffer[] = [];
+  for (const [name, value] of Object.entries(fields)) {
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
+  }
+  chunks.push(
+    Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${file.name}"\r\nContent-Type: ${file.type}\r\n\r\n`,
+    ),
+    file.body,
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  );
+  return { payload: Buffer.concat(chunks), contentType: `multipart/form-data; boundary=${boundary}` };
+}
+
+const onePixelPng = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
+
+async function testApp(options: { scanner?: MalwareScanner } = {}) {
+  const repository = new InMemoryTrustPayRepository();
   const app = await createApp({
-    repository: new InMemoryTrustPayRepository(),
+    repository,
     authService: new InMemoryAuthService(),
+    evidenceService: new EvidenceService(
+      repository,
+      new InMemoryObjectStorage(),
+      options.scanner ?? new AllowAllTestScanner(),
+    ),
   });
   apps.push(app);
   return app;
@@ -455,5 +490,215 @@ describe("TrustPay API", () => {
       payload: { action: "accept", authorityConfirmed: true, expectedVersionId: agreementId },
     });
     expect(missingKey.statusCode).toBe(400);
+  });
+
+  it("lets the SME upload and immutably submit real evidence for an accepted project", async () => {
+    const app = await testApp();
+    const smeCookie = await login(app, "nadia@example.test");
+    const milestoneId = "30000000-0000-4000-8000-000000000003";
+    const created = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions`,
+      headers: { cookie: smeCookie },
+      payload: { notes: "Finishing and handover evidence ready for review." },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().data).toMatchObject({ submissionNumber: 1, status: "draft", canEdit: true });
+    const submissionId = created.json().data.id as string;
+    const multipart = multipartEvidence(
+      {
+        description: "Completed finish sample",
+        acceptanceCriterionId: "31000000-0000-4000-8000-000000000004",
+      },
+      { name: "finish.png", type: "image/png", body: onePixelPng },
+    );
+    const uploaded = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${submissionId}/evidence`,
+      headers: { cookie: smeCookie, "content-type": multipart.contentType },
+      payload: multipart.payload,
+    });
+    expect(uploaded.statusCode).toBe(201);
+    expect(uploaded.json().data).toMatchObject({
+      originalName: "finish.png",
+      detectedMimeType: "image/png",
+      scanStatus: "clean",
+      acceptanceCriterion: "Finishes match the approved schedule",
+    });
+    expect(uploaded.json().data.sha256).toMatch(/^[a-f0-9]{64}$/);
+
+    const customerCookie = await login(app, "omar@example.test");
+    const hiddenDraft = await app.inject({
+      method: "GET",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions`,
+      headers: { cookie: customerCookie },
+    });
+    expect(hiddenDraft.json().data).toEqual([]);
+
+    const submitted = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${submissionId}/submit`,
+      headers: { cookie: smeCookie, "idempotency-key": "m03-submit-00000001" },
+    });
+    expect(submitted.statusCode).toBe(201);
+    expect(submitted.json().data).toMatchObject({ status: "submitted", canEdit: false });
+    const replay = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${submissionId}/submit`,
+      headers: { cookie: smeCookie, "idempotency-key": "m03-submit-00000001" },
+    });
+    expect(replay.statusCode).toBe(201);
+    expect(replay.json().data.replayed).toBe(true);
+
+    const customerList = await app.inject({
+      method: "GET",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions`,
+      headers: { cookie: customerCookie },
+    });
+    expect(customerList.json().data).toHaveLength(1);
+    const evidenceId = uploaded.json().data.id as string;
+    const download = await app.inject({
+      method: "GET",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${submissionId}/evidence/${evidenceId}/download`,
+      headers: { cookie: customerCookie },
+    });
+    expect(download.statusCode).toBe(200);
+    expect((await sharp(download.rawPayload).metadata()).format).toBe("png");
+    expect(download.rawPayload).not.toEqual(onePixelPng);
+    expect(download.headers["cache-control"]).toBe("private, no-store");
+
+    const immutableDelete = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${submissionId}/evidence/${evidenceId}`,
+      headers: { cookie: smeCookie },
+    });
+    expect(immutableDelete.statusCode).toBe(404);
+  });
+
+  it("rejects mismatched and cross-organization evidence access", async () => {
+    const app = await testApp();
+    const smeCookie = await login(app, "nadia@example.test");
+    const milestoneId = "30000000-0000-4000-8000-000000000003";
+    const created = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions`,
+      headers: { cookie: smeCookie },
+      payload: {},
+    });
+    const submissionId = created.json().data.id as string;
+    const mismatched = multipartEvidence({}, { name: "fake.pdf", type: "application/pdf", body: onePixelPng });
+    const rejected = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${submissionId}/evidence`,
+      headers: { cookie: smeCookie, "content-type": mismatched.contentType },
+      payload: mismatched.payload,
+    });
+    expect(rejected.statusCode).toBe(415);
+    expect(rejected.json().error.code).toBe("EVIDENCE_TYPE_MISMATCH");
+
+    const unrelatedCookie = await login(app, "samir@bank.example.test");
+    const hidden = await app.inject({
+      method: "GET",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${submissionId}`,
+      headers: { cookie: unrelatedCookie },
+    });
+    expect(hidden.statusCode).toBe(404);
+  });
+
+  it("fails oversized uploads before evidence is stored", async () => {
+    const app = await testApp();
+    const cookie = await login(app, "nadia@example.test");
+    const milestoneId = "30000000-0000-4000-8000-000000000003";
+    const created = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions`,
+      headers: { cookie },
+      payload: {},
+    });
+    const submissionId = created.json().data.id as string;
+    const oversized = multipartEvidence(
+      {},
+      { name: "too-large.png", type: "image/png", body: Buffer.alloc(10 * 1024 * 1024 + 1) },
+    );
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${submissionId}/evidence`,
+      headers: { cookie, "content-type": oversized.contentType },
+      payload: oversized.payload,
+    });
+    expect(response.statusCode).toBe(413);
+    expect(response.json().error.code).toBe("EVIDENCE_FILE_TOO_LARGE");
+  });
+
+  it("enforces the evidence-file count and keeps drafts private from customer and unrelated users", async () => {
+    const app = await testApp();
+    const smeCookie = await login(app, "nadia@example.test");
+    const milestoneId = "30000000-0000-4000-8000-000000000003";
+    const created = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions`,
+      headers: { cookie: smeCookie },
+      payload: {},
+    });
+    const submissionId = created.json().data.id as string;
+    let evidenceId = "";
+    for (let index = 0; index < 10; index += 1) {
+      const multipart = multipartEvidence(
+        {},
+        { name: `finish-${index}.png`, type: "image/png", body: onePixelPng },
+      );
+      const uploaded = await app.inject({
+        method: "POST",
+        url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${submissionId}/evidence`,
+        headers: { cookie: smeCookie, "content-type": multipart.contentType },
+        payload: multipart.payload,
+      });
+      expect(uploaded.statusCode).toBe(201);
+      evidenceId = uploaded.json().data.id as string;
+    }
+    const limitAttempt = multipartEvidence({}, { name: "one-too-many.png", type: "image/png", body: onePixelPng });
+    const limited = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${submissionId}/evidence`,
+      headers: { cookie: smeCookie, "content-type": limitAttempt.contentType },
+      payload: limitAttempt.payload,
+    });
+    expect(limited.statusCode).toBe(409);
+    expect(limited.json().error.code).toBe("EVIDENCE_FILE_LIMIT_REACHED");
+
+    for (const email of ["omar@example.test", "samir@bank.example.test"]) {
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${submissionId}/evidence/${evidenceId}/download`,
+        headers: { cookie: await login(app, email) },
+      });
+      expect(response.statusCode).toBe(404);
+    }
+  });
+
+  it("fails closed when malware scanning reports infection or is unavailable", async () => {
+    const milestoneId = "30000000-0000-4000-8000-000000000003";
+    for (const { scanner, expectedCode, expectedStatus } of [
+      { scanner: { scan: async () => "infected" as const }, expectedCode: "EVIDENCE_MALWARE_DETECTED", expectedStatus: 422 },
+      { scanner: { scan: async () => { throw new Error("scanner offline"); } }, expectedCode: "EVIDENCE_SCAN_UNAVAILABLE", expectedStatus: 503 },
+    ]) {
+      const app = await testApp({ scanner });
+      const cookie = await login(app, "nadia@example.test");
+      const created = await app.inject({
+        method: "POST",
+        url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions`,
+        headers: { cookie },
+        payload: {},
+      });
+      const multipart = multipartEvidence({}, { name: "finish.png", type: "image/png", body: onePixelPng });
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${created.json().data.id as string}/evidence`,
+        headers: { cookie, "content-type": multipart.contentType },
+        payload: multipart.payload,
+      });
+      expect(response.statusCode).toBe(expectedStatus);
+      expect(response.json().error.code).toBe(expectedCode);
+    }
   });
 });

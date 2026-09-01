@@ -4,11 +4,15 @@ import { DomainError } from "../domain/errors.js";
 import type { AuthService } from "../auth/auth-service.js";
 import { readSessionToken, requireUser, setSessionCookie } from "../auth/http.js";
 import type { TrustPayRepository } from "../repositories/trustpay-repository.js";
+import EvidenceService from "../evidence/evidence-service.js";
+import { safeDownloadName } from "../storage/file-validation.js";
 
 const projectParams = z.object({ projectId: z.string().min(1) });
 const milestoneParams = projectParams.extend({
   milestoneId: z.uuid(),
 });
+const submissionParams = milestoneParams.extend({ submissionId: z.uuid() });
+const evidenceParams = submissionParams.extend({ evidenceId: z.uuid() });
 const agreementParams = projectParams.extend({ agreementId: z.uuid() });
 const idempotencyKey = z.string().trim().min(16).max(128).regex(/^[A-Za-z0-9._-]+$/);
 const agreementDecisionBody = z.discriminatedUnion("action", [
@@ -85,6 +89,12 @@ const createProjectBody = z
 const createInvitationBody = z
   .object({ email: z.email().transform((email) => email.trim().toLowerCase()) })
   .strict();
+const submissionNotesBody = z.object({ notes: z.string().trim().max(5_000).optional() }).strict();
+const evidenceFields = z.object({
+  description: z.string().trim().max(2_000).optional(),
+  acceptanceCriterionId: z.uuid().optional(),
+  capturedAt: z.iso.datetime({ offset: true }).optional(),
+}).strict();
 
 function validationError(error: z.ZodError): DomainError {
   const message = error.issues
@@ -93,9 +103,19 @@ function validationError(error: z.ZodError): DomainError {
   return new DomainError(message, 400, "VALIDATION_ERROR");
 }
 
+function multipartField(fields: Record<string, unknown>, name: string): string | undefined {
+  const raw = fields[name];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (!value || typeof value !== "object" || !("value" in value)) return undefined;
+  return typeof (value as { value?: unknown }).value === "string"
+    ? (value as { value: string }).value
+    : undefined;
+}
+
 export function trustPayRoutes(
   repository: TrustPayRepository,
   authService: AuthService,
+  evidenceService: EvidenceService,
   secureCookies = false,
 ): FastifyPluginAsync {
   return async (app) => {
@@ -219,6 +239,158 @@ export function trustPayRoutes(
       );
       return reply.code(201).send({ data: invitation });
     });
+
+    app.post(
+      "/projects/:projectId/milestones/:milestoneId/submissions",
+      { config: { rateLimit: { max: 20, timeWindow: "1 hour" } } },
+      async (request, reply) => {
+        const user = await requireUser(request, authService);
+        const params = milestoneParams.safeParse(request.params);
+        if (!params.success) throw validationError(params.error);
+        const body = submissionNotesBody.safeParse(request.body ?? {});
+        if (!body.success) throw validationError(body.error);
+        const submission = await repository.createSubmission(
+          params.data.projectId,
+          params.data.milestoneId,
+          body.data.notes,
+          user.id,
+        );
+        return reply.code(201).send({ data: submission });
+      },
+    );
+
+    app.get("/projects/:projectId/milestones/:milestoneId/submissions", async (request) => {
+      const user = await requireUser(request, authService);
+      const params = milestoneParams.safeParse(request.params);
+      if (!params.success) throw validationError(params.error);
+      return {
+        data: await repository.listSubmissions(params.data.projectId, params.data.milestoneId, user.id),
+      };
+    });
+
+    app.get("/projects/:projectId/milestones/:milestoneId/submissions/:submissionId", async (request) => {
+      const user = await requireUser(request, authService);
+      const params = submissionParams.safeParse(request.params);
+      if (!params.success) throw validationError(params.error);
+      const submission = await repository.findSubmission(
+        params.data.projectId,
+        params.data.milestoneId,
+        params.data.submissionId,
+        user.id,
+      );
+      if (!submission) throw new DomainError("Submission not found", 404, "SUBMISSION_NOT_FOUND");
+      return { data: submission };
+    });
+
+    app.patch("/projects/:projectId/milestones/:milestoneId/submissions/:submissionId", async (request) => {
+      const user = await requireUser(request, authService);
+      const params = submissionParams.safeParse(request.params);
+      if (!params.success) throw validationError(params.error);
+      const body = submissionNotesBody.safeParse(request.body ?? {});
+      if (!body.success) throw validationError(body.error);
+      return {
+        data: await repository.updateSubmissionNotes(
+          params.data.projectId,
+          params.data.milestoneId,
+          params.data.submissionId,
+          body.data.notes,
+          user.id,
+        ),
+      };
+    });
+
+    app.post(
+      "/projects/:projectId/milestones/:milestoneId/submissions/:submissionId/evidence",
+      { config: { rateLimit: { max: 20, timeWindow: "1 hour" } } },
+      async (request, reply) => {
+        const user = await requireUser(request, authService);
+        const params = submissionParams.safeParse(request.params);
+        if (!params.success) throw validationError(params.error);
+        const file = await request.file();
+        if (!file) throw new DomainError("Select one evidence file", 400, "EVIDENCE_FILE_REQUIRED");
+        const body = await file.toBuffer();
+        const rawFields = file.fields as unknown as Record<string, unknown>;
+        const fields = evidenceFields.safeParse({
+          description: multipartField(rawFields, "description"),
+          acceptanceCriterionId: multipartField(rawFields, "acceptanceCriterionId"),
+          capturedAt: multipartField(rawFields, "capturedAt"),
+        });
+        if (!fields.success) throw validationError(fields.error);
+        const evidence = await evidenceService.upload({
+          ...params.data,
+          userId: user.id,
+          originalName: file.filename,
+          declaredMimeType: file.mimetype,
+          body,
+          ...(fields.data.description ? { description: fields.data.description } : {}),
+          ...(fields.data.acceptanceCriterionId ? { acceptanceCriterionId: fields.data.acceptanceCriterionId } : {}),
+          ...(fields.data.capturedAt ? { capturedAt: new Date(fields.data.capturedAt) } : {}),
+        });
+        return reply.code(201).send({ data: evidence });
+      },
+    );
+
+    app.delete(
+      "/projects/:projectId/milestones/:milestoneId/submissions/:submissionId/evidence/:evidenceId",
+      async (request, reply) => {
+        const user = await requireUser(request, authService);
+        const params = evidenceParams.safeParse(request.params);
+        if (!params.success) throw validationError(params.error);
+        await evidenceService.remove(
+          params.data.projectId,
+          params.data.milestoneId,
+          params.data.submissionId,
+          params.data.evidenceId,
+          user.id,
+        );
+        return reply.code(204).send();
+      },
+    );
+
+    app.post(
+      "/projects/:projectId/milestones/:milestoneId/submissions/:submissionId/submit",
+      { config: { rateLimit: { max: 10, timeWindow: "1 hour" } } },
+      async (request, reply) => {
+        const user = await requireUser(request, authService);
+        const params = submissionParams.safeParse(request.params);
+        if (!params.success) throw validationError(params.error);
+        const key = idempotencyKey.safeParse(request.headers["idempotency-key"]);
+        if (!key.success) throw new DomainError("An Idempotency-Key header is required", 400, "IDEMPOTENCY_KEY_REQUIRED");
+        const submission = await evidenceService.submit(
+          params.data.projectId,
+          params.data.milestoneId,
+          params.data.submissionId,
+          user.id,
+          key.data,
+          request.id,
+        );
+        return reply.code(201).send({ data: submission });
+      },
+    );
+
+    app.get(
+      "/projects/:projectId/milestones/:milestoneId/submissions/:submissionId/evidence/:evidenceId/download",
+      async (request, reply) => {
+        const user = await requireUser(request, authService);
+        const params = evidenceParams.safeParse(request.params);
+        if (!params.success) throw validationError(params.error);
+        const { metadata, object } = await evidenceService.download(
+          params.data.projectId,
+          params.data.milestoneId,
+          params.data.submissionId,
+          params.data.evidenceId,
+          user.id,
+        );
+        const filename = encodeURIComponent(safeDownloadName(metadata.originalName));
+        return reply
+          .header("Cache-Control", "private, no-store")
+          .header("Content-Security-Policy", "sandbox")
+          .header("X-Content-Type-Options", "nosniff")
+          .header("Content-Disposition", `attachment; filename*=UTF-8''${filename}`)
+          .type(object.contentType)
+          .send(object.body);
+      },
+    );
 
     app.post(
       "/projects/:projectId/milestones/:milestoneId/decisions",
