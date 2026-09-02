@@ -56,3 +56,40 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER change_request_responses_append_only
 BEFORE UPDATE OR DELETE ON "change_request_responses"
 FOR EACH ROW EXECUTE FUNCTION trustpay_prevent_change_request_response_mutation();
+
+-- Decisions, requests, their references, and activity are historical records.
+-- The application database role must never rewrite or remove them.  The guarded
+-- escape hatch is for isolated test cleanup only; it is set transaction-locally
+-- in the PostgreSQL test suite and is not used by application code.
+CREATE OR REPLACE FUNCTION trustpay_prevent_historical_record_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF current_setting('trustpay.allow_history_cleanup', true) = 'on' THEN
+    IF TG_OP = 'DELETE' THEN
+      RETURN OLD;
+    END IF;
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION '% records are append-only', TG_TABLE_NAME;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER milestone_decisions_append_only
+BEFORE UPDATE OR DELETE ON "milestone_decisions"
+FOR EACH ROW EXECUTE FUNCTION trustpay_prevent_historical_record_mutation();
+
+CREATE TRIGGER change_requests_append_only
+BEFORE UPDATE OR DELETE ON "change_requests"
+FOR EACH ROW EXECUTE FUNCTION trustpay_prevent_historical_record_mutation();
+
+CREATE TRIGGER change_request_acceptance_criteria_append_only
+BEFORE UPDATE OR DELETE ON "change_request_acceptance_criteria"
+FOR EACH ROW EXECUTE FUNCTION trustpay_prevent_historical_record_mutation();
+
+CREATE TRIGGER change_request_evidence_items_append_only
+BEFORE UPDATE OR DELETE ON "change_request_evidence_items"
+FOR EACH ROW EXECUTE FUNCTION trustpay_prevent_historical_record_mutation();
+
+CREATE TRIGGER activity_events_append_only
+BEFORE UPDATE OR DELETE ON "activity_events"
+FOR EACH ROW EXECUTE FUNCTION trustpay_prevent_historical_record_mutation();

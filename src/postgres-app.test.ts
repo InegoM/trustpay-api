@@ -61,6 +61,7 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
     const decisionIds = decisions.map((decision) => decision.id);
 
     await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('trustpay.allow_history_cleanup', 'on', true)`;
       await tx.changeRequestResponse.deleteMany({ where: { changeRequest: { decisionId: { in: decisionIds } } } });
       await tx.changeRequestAcceptanceCriterion.deleteMany({ where: { changeRequest: { decisionId: { in: decisionIds } } } });
       await tx.changeRequestEvidenceItem.deleteMany({ where: { changeRequest: { decisionId: { in: decisionIds } } } });
@@ -288,6 +289,7 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
       where: { email: invitedEmail },
     });
     await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('trustpay.allow_history_cleanup', 'on', true)`;
       await tx.activityEvent.deleteMany({ where: { projectId: created.id } });
       await tx.outboxEvent.deleteMany({
         where: { aggregateType: "invitation", aggregateId: invitationId },
@@ -367,6 +369,7 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
     const invitedUser = await prisma.user.findUniqueOrThrow({ where: { email: invitedEmail } });
     const customerParty = project.parties.find((party) => party.role === "CUSTOMER");
     await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('trustpay.allow_history_cleanup', 'on', true)`;
       await tx.activityEvent.deleteMany({ where: { projectId: project.id } });
       await tx.outboxEvent.deleteMany({ where: { aggregateId: { in: [agreement.id, invitation.json().data.invitation.id] } } });
       await tx.idempotencyKey.deleteMany({ where: { userId: invitedUser.id } });
@@ -406,6 +409,16 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
     expect(response.json().data).toMatchObject({ submissionNumber: 2, status: "draft", responseToChangeRequest: { changeRequestId: changeRequest.id } });
     const persisted = await prisma.changeRequestResponse.findUniqueOrThrow({ where: { changeRequestId: changeRequest.id } });
     expect(persisted.resubmissionId).toBe(response.json().data.id);
+    await expect(prisma.milestoneDecision.update({
+      where: { id: changeRequest.decisionId }, data: { reference: "tampered" },
+    })).rejects.toThrow(/milestone_decisions records are append-only/);
+    await expect(prisma.changeRequest.update({
+      where: { id: changeRequest.id }, data: { comment: "tampered" },
+    })).rejects.toThrow(/change_requests records are append-only/);
+    const event = await prisma.activityEvent.findFirstOrThrow({
+      where: { projectId: changeRequest.projectId }, orderBy: { occurredAt: "desc" },
+    });
+    await expect(prisma.activityEvent.delete({ where: { id: event.id } })).rejects.toThrow(/activity_events records are append-only/);
   });
 
   it("enforces submitted evidence immutability inside PostgreSQL", async () => {
