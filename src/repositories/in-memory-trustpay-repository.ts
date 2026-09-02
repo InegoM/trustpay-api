@@ -18,6 +18,7 @@ import type {
   MilestoneSubmissionRecord,
   Project,
   ProjectInvitation,
+  RespondToChangeRequestInput,
 } from "../domain/types.js";
 import type { TrustPayRepository } from "./trustpay-repository.js";
 
@@ -114,6 +115,7 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
   ]);
   private readonly idempotentAgreementDecisions = new Map<string, { requestHash: string; result: AgreementDecisionResult }>();
   private readonly idempotentSubmissions = new Map<string, MilestoneSubmissionRecord>();
+  private readonly idempotentChangeRequestResponses = new Map<string, MilestoneSubmissionRecord>();
   private readonly submissions = new Map<string, MilestoneSubmissionRecord[]>();
   private readonly evidenceStorageKeys = new Map<string, string>();
 
@@ -357,7 +359,55 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
       throw new DomainError("Project not found", 404, "PROJECT_NOT_FOUND");
     }
     const isSme = userId === "20000000-0000-4000-8000-000000000001";
-    return copy((this.submissions.get(milestoneId) ?? []).filter((item) => isSme || item.status === "submitted"));
+    return copy((this.submissions.get(milestoneId) ?? [])
+      .filter((item) => isSme || item.status === "submitted")
+      .sort((left, right) => right.submissionNumber - left.submissionNumber));
+  }
+
+  async listChangeRequests(projectId: string, milestoneId: string, userId: string) {
+    const submissions = await this.listSubmissions(projectId, milestoneId, userId);
+    return submissions.flatMap((submission) => submission.changeRequest ? [copy(submission.changeRequest)] : []);
+  }
+
+  async respondToChangeRequest(
+    projectId: string,
+    milestoneId: string,
+    changeRequestId: string,
+    input: RespondToChangeRequestInput,
+    userId: string,
+    idempotencyKey: string,
+    _requestId: string,
+  ): Promise<MilestoneSubmissionRecord & { replayed?: boolean }> {
+    if (userId !== "20000000-0000-4000-8000-000000000001" || !this.projects.has(projectId)) {
+      throw new DomainError("Change request not found", 404, "CHANGE_REQUEST_NOT_FOUND");
+    }
+    const replayKey = `${userId}:${idempotencyKey}`;
+    const replay = this.idempotentChangeRequestResponses.get(replayKey);
+    if (replay) return { ...copy(replay), replayed: true };
+    const project = this.projects.get(projectId)!;
+    const milestone = project.milestones.find((item) => item.id === milestoneId);
+    const source = (this.submissions.get(milestoneId) ?? []).find((item) => item.changeRequest?.id === changeRequestId);
+    if (!milestone || milestone.status !== "changes-requested" || !source?.changeRequest) {
+      throw new DomainError("Change request not found", 404, "CHANGE_REQUEST_NOT_FOUND");
+    }
+    if ((this.submissions.get(milestoneId) ?? []).some((item) => item.responseToChangeRequest?.changeRequestId === changeRequestId)) {
+      throw new DomainError("This change request has already received a response", 409, "CHANGE_REQUEST_ALREADY_RESPONDED");
+    }
+    const createdAt = new Date().toISOString();
+    const submission: MilestoneSubmissionRecord = {
+      id: randomUUID(), projectId, milestoneId, milestoneSequenceNumber: milestone.sequenceNumber,
+      milestoneName: milestone.name, submissionNumber: Math.max(...(this.submissions.get(milestoneId) ?? []).map((item) => item.submissionNumber), 0) + 1,
+      status: "draft", ...(input.notes ? { notes: input.notes } : {}), createdAt, submittedBy: "Nadia Rahman",
+      agreementVersionId: project.agreementId!, agreementVersion: project.agreementVersion, evidence: [], canEdit: true,
+      responseToChangeRequest: { id: randomUUID(), changeRequestId, response: input.response, respondedBy: "Nadia Rahman", respondedAt: createdAt },
+    };
+    this.submissions.set(milestoneId, [...(this.submissions.get(milestoneId) ?? []), submission]);
+    this.activity.unshift({ id: randomUUID(), projectId, milestoneId, milestoneSequenceNumber: milestone.sequenceNumber,
+      actor: "Nadia Rahman", actorType: "sme", occurredAt: createdAt, type: "change-request-responded",
+      description: `Response recorded for change request; evidence submission ${submission.submissionNumber} opened for resubmission`,
+    });
+    this.idempotentChangeRequestResponses.set(replayKey, copy(submission));
+    return copy(submission);
   }
 
   async findSubmission(
@@ -441,7 +491,7 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
     const submission = this.editableSubmission(projectId, milestoneId, submissionId, userId);
     if (submission.evidence.length === 0) throw new DomainError("Add at least one evidence file before submitting", 409, "EVIDENCE_REQUIRED");
     const milestone = this.projects.get(projectId)?.milestones.find((item) => item.id === milestoneId);
-    if (!milestone || milestone.status !== "in-progress") {
+    if (!milestone || (milestone.status !== "in-progress" && !(milestone.status === "changes-requested" && submission.responseToChangeRequest))) {
       throw new DomainError("This milestone cannot be submitted in its current state", 409, "MILESTONE_NOT_SUBMITTABLE");
     }
     const submittedAt = new Date().toISOString();
@@ -677,6 +727,15 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
 
     if (decision.action === "request-changes") {
       milestone.status = "changes-requested";
+      const submission = (this.submissions.get(milestone.id) ?? []).filter((item) => item.status === "submitted").sort((a, b) => b.submissionNumber - a.submissionNumber)[0];
+      if (submission) {
+        submission.decision = { id: randomUUID(), action: "request-changes", decidedBy: project.authorizedApprover, decidedAt: occurredAt, reference: decisionReference };
+        submission.changeRequest = {
+          id: randomUUID(), reasonCategory: decision.reason, reason: decision.reason, requiredChanges: decision.comment, comment: decision.comment, responseDueAt: `${decision.responseDate}T23:59:59.999Z`,
+          requestedBy: project.authorizedApprover, requestedAt: occurredAt, decisionReference,
+          acceptanceCriterionIds: [...new Set(decision.acceptanceCriterionIds ?? [])], evidenceItemIds: [...new Set(decision.evidenceItemIds ?? [])],
+        };
+      }
       return [
         {
           ...base,

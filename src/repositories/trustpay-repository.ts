@@ -14,6 +14,7 @@ import type {
   MilestoneSubmissionRecord,
   Project,
   ProjectInvitation,
+  RespondToChangeRequestInput,
 } from "../domain/types.js";
 
 export interface TrustPayRepository {
@@ -41,6 +42,15 @@ export interface TrustPayRepository {
     notes: string | undefined,
     userId: string,
   ): Promise<MilestoneSubmissionRecord>;
+  respondToChangeRequest(
+    projectId: string,
+    milestoneId: string,
+    changeRequestId: string,
+    input: RespondToChangeRequestInput,
+    userId: string,
+    idempotencyKey: string,
+    requestId: string,
+  ): Promise<MilestoneSubmissionRecord & { replayed?: boolean }>;
   updateSubmissionNotes(
     projectId: string,
     milestoneId: string,
@@ -53,6 +63,11 @@ export interface TrustPayRepository {
     milestoneId: string,
     userId: string,
   ): Promise<MilestoneSubmissionRecord[]>;
+  listChangeRequests(
+    projectId: string,
+    milestoneId: string,
+    userId: string,
+  ): Promise<import("../domain/types.js").ChangeRequestRecord[]>;
   findSubmission(
     projectId: string,
     milestoneId: string,

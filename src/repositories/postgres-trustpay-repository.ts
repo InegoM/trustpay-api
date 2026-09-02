@@ -32,6 +32,7 @@ import type {
   MilestoneStatus,
   Project,
   ProjectInvitation,
+  RespondToChangeRequestInput,
 } from "../domain/types.js";
 import {
   DEFAULT_MAX_FILES_PER_SUBMISSION,
@@ -85,6 +86,13 @@ const submissionInclude = {
     include: { uploadedBy: true, acceptanceCriterion: true },
     orderBy: { uploadedAt: "asc" },
   },
+  decision: {
+    include: {
+      decidedBy: true,
+      changeRequest: { include: { response: { include: { respondedBy: true } }, acceptanceCriteria: true, evidenceItems: true } },
+    },
+  },
+  changeRequestResponse: { include: { changeRequest: true, respondedBy: true } },
 } as const satisfies Prisma.MilestoneSubmissionInclude;
 
 type ProjectRow = Prisma.ProjectGetPayload<{ include: typeof projectInclude }>;
@@ -304,6 +312,7 @@ const activityTypes: Record<DbActivityType, ActivityType> = {
   EVIDENCE_SUBMITTED: "evidence-submitted",
   MILESTONE_APPROVED: "milestone-approved",
   CHANGES_REQUESTED: "changes-requested",
+  CHANGE_REQUEST_RESPONDED: "change-request-responded",
   DISPUTE_RECORDED: "dispute-recorded",
   DECISION_RECORDED: "decision-recorded",
   VARIATION_APPROVED: "decision-recorded",
@@ -427,6 +436,9 @@ function mapEvidence(row: SubmissionRow["evidenceItems"][number], projectSlug: s
 }
 
 function mapSubmission(row: SubmissionRow, canEdit: boolean): MilestoneSubmissionRecord {
+  const decision = row.decision;
+  const changeRequest = decision?.changeRequest;
+  const response = row.changeRequestResponse;
   return {
     id: row.id,
     projectId: row.milestone.project.slug,
@@ -443,6 +455,37 @@ function mapSubmission(row: SubmissionRow, canEdit: boolean): MilestoneSubmissio
     agreementVersion: agreementVersionLabel(row.agreementVersion.versionNumber),
     evidence: row.evidenceItems.map((item) => mapEvidence(item, row.milestone.project.slug, row.milestoneId)),
     canEdit: canEdit && row.status === DbSubmissionStatus.DRAFT,
+    ...(decision ? {
+      decision: {
+        id: decision.id,
+        action: decision.action === DecisionAction.APPROVE ? "approve" : decision.action === DecisionAction.REQUEST_CHANGES ? "request-changes" : "raise-dispute",
+        decidedBy: decision.decidedBy.displayName,
+        decidedAt: decision.decidedAt.toISOString(),
+        reference: decision.reference,
+      },
+    } : {}),
+    ...(changeRequest ? {
+      changeRequest: {
+        id: changeRequest.id, reasonCategory: changeRequest.reason, requiredChanges: changeRequest.comment,
+        reason: changeRequest.reason,
+        comment: changeRequest.comment,
+        responseDueAt: changeRequest.responseDueAt.toISOString(),
+        requestedBy: decision!.decidedBy.displayName,
+        requestedAt: decision!.decidedAt.toISOString(),
+        decisionReference: decision!.reference,
+        acceptanceCriterionIds: changeRequest.acceptanceCriteria.map((item) => item.acceptanceCriterionId),
+        evidenceItemIds: changeRequest.evidenceItems.map((item) => item.evidenceItemId),
+      },
+    } : {}),
+    ...(response ? {
+      responseToChangeRequest: {
+        id: response.id,
+        changeRequestId: response.changeRequestId,
+        response: response.response,
+        respondedBy: response.respondedBy.displayName,
+        respondedAt: response.createdAt.toISOString(),
+      },
+    } : {}),
   };
 }
 
@@ -869,6 +912,94 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
     );
   }
 
+  async respondToChangeRequest(
+    projectId: string,
+    milestoneId: string,
+    changeRequestId: string,
+    input: RespondToChangeRequestInput,
+    userId: string,
+    idempotencyKey: string,
+    requestId: string,
+  ): Promise<MilestoneSubmissionRecord & { replayed?: boolean }> {
+    const scope = `change-request-response:${userId}`;
+    const requestHash = createHash("sha256")
+      .update(JSON.stringify({ projectId, milestoneId, changeRequestId, input }))
+      .digest("hex");
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const existingKey = await tx.idempotencyKey.findUnique({ where: { scope_key: { scope, key: idempotencyKey } } });
+        if (existingKey) {
+          if (existingKey.requestHash !== requestHash) throw new DomainError("This idempotency key was used for another request", 409, "IDEMPOTENCY_KEY_REUSED");
+          if (existingKey.responseBody) return { ...(existingKey.responseBody as unknown as MilestoneSubmissionRecord), replayed: true };
+          throw new DomainError("This change-request response is already being processed", 409, "IDEMPOTENCY_IN_PROGRESS");
+        }
+        await tx.idempotencyKey.create({
+          data: { userId, scope, key: idempotencyKey, requestHash, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) },
+        });
+        const changeRequest = await tx.changeRequest.findFirst({
+          where: {
+            id: changeRequestId,
+            decision: {
+              action: DecisionAction.REQUEST_CHANGES,
+              submission: {
+                milestoneId,
+                milestone: {
+                  status: DbMilestoneStatus.CHANGES_REQUESTED,
+                  project: { slug: projectId, owningOrganization: { memberships: { some: { userId, role: { in: ["OWNER", "ADMIN"] } } } } },
+                },
+              },
+            },
+          },
+          include: { decision: { include: { submission: { include: { milestone: { include: { project: true } } } } } }, response: true },
+        });
+        if (!changeRequest) throw new DomainError("Change request not found", 404, "CHANGE_REQUEST_NOT_FOUND");
+        if (changeRequest.response) throw new DomainError("This change request has already received a response", 409, "CHANGE_REQUEST_ALREADY_RESPONDED");
+        const project = changeRequest.decision.submission.milestone.project;
+        const agreement = await tx.agreementVersion.findFirst({
+          where: { projectId: project.id, status: DbAgreementStatus.ACTIVE, acceptances: { some: {} } },
+          orderBy: { versionNumber: "desc" },
+        });
+        if (!agreement) throw new DomainError("A recorded agreement acceptance is required before resubmission", 409, "AGREEMENT_NOT_ACCEPTED");
+        const existingDraft = await tx.milestoneSubmission.findFirst({ where: { milestoneId, status: DbSubmissionStatus.DRAFT } });
+        if (existingDraft) throw new DomainError("A resubmission draft already exists", 409, "RESUBMISSION_DRAFT_EXISTS");
+        const latest = await tx.milestoneSubmission.aggregate({ where: { milestoneId }, _max: { submissionNumber: true } });
+        const created = await tx.milestoneSubmission.create({
+          data: {
+            milestoneId,
+            agreementVersionId: agreement.id,
+            submissionNumber: (latest._max.submissionNumber ?? 0) + 1,
+            submittedByUserId: userId,
+            ...(input.notes ? { notes: input.notes } : {}),
+          },
+        });
+        const response = await tx.changeRequestResponse.create({
+          data: { changeRequestId, resubmissionId: created.id, respondedByUserId: userId, response: input.response },
+          include: { respondedBy: true },
+        });
+        const actor = await tx.user.findUniqueOrThrow({ where: { id: userId } });
+        await tx.activityEvent.create({
+          data: {
+            projectId: project.id, milestoneId, actorUserId: userId, actorOrganizationId: project.owningOrganizationId,
+            actorName: actor.displayName, actorType: "sme", type: DbActivityType.CHANGE_REQUEST_RESPONDED,
+            description: `Response recorded for change request; evidence submission ${(latest._max.submissionNumber ?? 0) + 1} opened for resubmission`,
+            payload: { changeRequestId, responseId: response.id, resubmissionId: created.id, requestId },
+          },
+        });
+        const mapped = mapSubmission(await tx.milestoneSubmission.findUniqueOrThrow({ where: { id: created.id }, include: submissionInclude }), true);
+        await tx.idempotencyKey.update({
+          where: { scope_key: { scope, key: idempotencyKey } },
+          data: { responseStatus: 201, responseBody: mapped as unknown as Prisma.InputJsonValue },
+        });
+        return mapped;
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === "P2002" || error.code === "P2034")) {
+        throw new DomainError("This change request changed before the response completed", 409, "CHANGE_REQUEST_STALE");
+      }
+      throw error;
+    }
+  }
+
   async listSubmissions(
     projectId: string,
     milestoneId: string,
@@ -929,6 +1060,26 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
       include: submissionInclude,
     });
     return row ? mapSubmission(row, canEdit) : null;
+  }
+
+  async listChangeRequests(projectId: string, milestoneId: string, userId: string) {
+    const milestone = await this.prisma.milestone.findFirst({
+      where: { id: milestoneId, project: { slug: projectId, OR: projectAccess(userId) } },
+      select: { id: true },
+    });
+    if (!milestone) throw new DomainError("Milestone not found", 404, "MILESTONE_NOT_FOUND");
+    const rows = await this.prisma.changeRequest.findMany({
+      where: { decision: { submission: { milestoneId } } },
+      include: { decision: { include: { decidedBy: true } }, acceptanceCriteria: true, evidenceItems: true },
+      orderBy: { createdAt: "desc" },
+    });
+    return rows.map((item) => ({
+      id: item.id, reasonCategory: item.reason, reason: item.reason, requiredChanges: item.comment, comment: item.comment,
+      responseDueAt: item.responseDueAt.toISOString(), requestedBy: item.decision.decidedBy.displayName,
+      requestedAt: item.createdAt.toISOString(), decisionReference: item.decision.reference,
+      acceptanceCriterionIds: item.acceptanceCriteria.map((reference) => reference.acceptanceCriterionId),
+      evidenceItemIds: item.evidenceItems.map((reference) => reference.evidenceItemId),
+    }));
   }
 
   async addEvidence(
@@ -1113,7 +1264,13 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
         });
         if (updated.count !== 1) throw new DomainError("This submission is no longer editable", 409, "SUBMISSION_ALREADY_FINALIZED");
         const milestoneUpdated = await tx.milestone.updateMany({
-          where: { id: milestoneId, status: DbMilestoneStatus.IN_PROGRESS },
+          where: {
+            id: milestoneId,
+            OR: [
+              { status: DbMilestoneStatus.IN_PROGRESS },
+              { status: DbMilestoneStatus.CHANGES_REQUESTED, submissions: { some: { id: submission.id, changeRequestResponse: { is: { } } } } },
+            ],
+          },
           data: { status: DbMilestoneStatus.AWAITING_DECISION },
         });
         if (milestoneUpdated.count !== 1) {
@@ -1483,10 +1640,12 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
             milestones: {
               where: { id: milestoneId },
               include: {
+                acceptanceCriteria: { select: { id: true } },
                 submissions: {
                   where: { status: DbSubmissionStatus.SUBMITTED },
                   orderBy: { submissionNumber: "desc" },
                   take: 1,
+                  include: { evidenceItems: { select: { id: true } } },
                 },
               },
             },
@@ -1514,6 +1673,16 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
             409,
             "MILESTONE_NOT_SUBMITTED",
           );
+        }
+        if (decision.action === "request-changes") {
+          const criterionIds = new Set(milestone.acceptanceCriteria.map((criterion) => criterion.id));
+          const evidenceIds = new Set(submission.evidenceItems.map((evidence) => evidence.id));
+          if ((decision.acceptanceCriterionIds ?? []).some((id) => !criterionIds.has(id))) {
+            throw new DomainError("A referenced acceptance criterion does not belong to this milestone", 400, "CHANGE_REQUEST_CRITERION_INVALID");
+          }
+          if ((decision.evidenceItemIds ?? []).some((id) => !evidenceIds.has(id))) {
+            throw new DomainError("A referenced evidence item does not belong to this submission", 400, "CHANGE_REQUEST_EVIDENCE_INVALID");
+          }
         }
 
         const updated = await tx.milestone.updateMany({
@@ -1591,6 +1760,12 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
               reason: decision.reason,
               comment: decision.comment,
               responseDueAt: new Date(`${decision.responseDate}T23:59:59.999Z`),
+              ...(decision.acceptanceCriterionIds?.length
+                ? { acceptanceCriteria: { create: decision.acceptanceCriterionIds.map((acceptanceCriterionId) => ({ acceptanceCriterionId })) } }
+                : {}),
+              ...(decision.evidenceItemIds?.length
+                ? { evidenceItems: { create: decision.evidenceItemIds.map((evidenceItemId) => ({ evidenceItemId })) } }
+                : {}),
             },
           });
         } else {
