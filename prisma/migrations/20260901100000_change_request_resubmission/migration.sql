@@ -49,6 +49,12 @@ CREATE INDEX "change_request_evidence_items_evidence_item_id_idx"
 CREATE OR REPLACE FUNCTION trustpay_prevent_change_request_response_mutation()
 RETURNS TRIGGER AS $$
 BEGIN
+  IF current_setting('trustpay.allow_history_cleanup', true) = 'on' THEN
+    IF TG_OP = 'DELETE' THEN
+      RETURN OLD;
+    END IF;
+    RETURN NEW;
+  END IF;
   RAISE EXCEPTION 'change request responses are append-only';
 END;
 $$ LANGUAGE plpgsql;
