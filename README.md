@@ -99,6 +99,8 @@ npm run security:password-benchmark
 - `POST /api/v1/projects/:projectId/agreements/:agreementId/decisions`
 - `POST /api/v1/projects/:projectId/milestones/:milestoneId/submissions`
 - `GET /api/v1/projects/:projectId/milestones/:milestoneId/submissions`
+- `GET /api/v1/projects/:projectId/milestones/:milestoneId/change-requests`
+- `POST /api/v1/projects/:projectId/milestones/:milestoneId/change-requests/:changeRequestId/respond`
 - `GET /api/v1/projects/:projectId/milestones/:milestoneId/submissions/:submissionId`
 - `PATCH /api/v1/projects/:projectId/milestones/:milestoneId/submissions/:submissionId`
 - `POST /api/v1/projects/:projectId/milestones/:milestoneId/submissions/:submissionId/evidence`
@@ -108,3 +110,7 @@ npm run security:password-benchmark
 - `POST /api/v1/projects/:projectId/milestones/:milestoneId/decisions`
 
 All endpoints except health, login, and invitation acceptance require a server-managed HTTP-only session cookie. Project data is scoped on the server to the authenticated user's organization memberships; unrelated organizations receive a safe `404` for a project outside their scope.
+
+## M04 change requests and resubmission
+
+A customer decision of `request-changes` records an immutable reason, required changes, response date, decision reference, and optional acceptance-criterion/evidence references. An SME owner or administrator then posts a written response to the change-request response endpoint with an idempotency key. That atomically opens a new draft submission version; the original submitted package, decision, request, and response remain readable in submission history. The SME uploads evidence to that new version and finalizes it using the existing submission endpoint. Only the assigned customer approver can decide the resubmitted package.

@@ -63,6 +63,46 @@ export interface MilestoneSubmissionRecord {
   agreementVersion: string;
   evidence: EvidenceItemRecord[];
   canEdit: boolean;
+  decision?: SubmissionDecisionRecord;
+  changeRequest?: ChangeRequestRecord;
+  responseToChangeRequest?: ChangeRequestResponseRecord;
+}
+
+export interface SubmissionDecisionRecord {
+  id: string;
+  action: "approve" | "request-changes" | "raise-dispute";
+  decidedBy: string;
+  decidedAt: string;
+  reference: string;
+}
+
+export interface ChangeRequestRecord {
+  id: string;
+  /** A structured category supplied as `reason` in the decision command. */
+  reasonCategory: string;
+  reason: string;
+  /** Required corrective work supplied as `comment` in the decision command. */
+  requiredChanges: string;
+  comment: string;
+  responseDueAt: string;
+  requestedBy: string;
+  requestedAt: string;
+  decisionReference: string;
+  acceptanceCriterionIds: string[];
+  evidenceItemIds: string[];
+}
+
+export interface ChangeRequestResponseRecord {
+  id: string;
+  changeRequestId: string;
+  response: string;
+  respondedBy: string;
+  respondedAt: string;
+}
+
+export interface RespondToChangeRequestInput {
+  response: string;
+  notes?: string;
 }
 
 export interface AddEvidenceInput {
@@ -206,15 +246,19 @@ export interface CreatedProjectInvitation {
 }
 
 export type DecisionInput =
-  | { action: "approve" }
+  | { action: "approve"; expectedSubmissionId: string }
   | {
       action: "request-changes";
+      expectedSubmissionId: string;
       reason: string;
       comment: string;
       responseDate: string;
+      acceptanceCriterionIds?: string[] | undefined;
+      evidenceItemIds?: string[] | undefined;
     }
   | {
       action: "raise-dispute";
+      expectedSubmissionId: string;
       reason: string;
       explanation: string;
     };
@@ -229,6 +273,7 @@ export type ActivityType =
   | "milestone-approved"
   | "evidence-submitted"
   | "changes-requested"
+  | "change-request-responded"
   | "dispute-recorded"
   | "decision-recorded";
 

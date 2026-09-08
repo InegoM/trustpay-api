@@ -4,12 +4,18 @@ import createApp from "./app.js";
 import { createPrismaClient } from "./database/prisma.js";
 import PostgresTrustPayRepository from "./repositories/postgres-trustpay-repository.js";
 import PostgresAuthService from "./auth/postgres-auth-service.js";
+import { seedDatabase } from "../prisma/seed.js";
 
 const testUrl = process.env.TEST_DATABASE_URL;
 const describeDatabase = testUrl ? describe : describe.skip;
 
 describeDatabase("TrustPay PostgreSQL persistence", () => {
   if (!testUrl) return;
+
+  const databaseName = new URL(testUrl).pathname.replace(/^\//, "");
+  if (!databaseName.startsWith("trustpay_test")) {
+    throw new Error("TEST_DATABASE_URL must target an isolated trustpay_test database.");
+  }
 
   const prisma = createPrismaClient(testUrl);
 
@@ -28,57 +34,10 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
   }
 
   beforeEach(async () => {
-    const invitedUser = await prisma.user.findUnique({
-      where: { email: "layla@example.test" },
-      select: { id: true },
-    });
-    if (invitedUser) {
-      await prisma.authSession.deleteMany({ where: { userId: invitedUser.id } });
-      await prisma.organizationMembership.deleteMany({ where: { userId: invitedUser.id } });
-      await prisma.userCredential.deleteMany({ where: { userId: invitedUser.id } });
-      await prisma.user.delete({ where: { id: invitedUser.id } });
-    }
-    await prisma.invitation.updateMany({
-      where: { id: "80000000-0000-4000-8000-000000000001" },
-      data: { status: "PENDING" },
-    });
-    const project = await prisma.project.findUniqueOrThrow({
-      where: { slug: "cafe-renovation" },
-      include: {
-        milestones: {
-          where: { sequenceNumber: 2 },
-          include: { submissions: true },
-        },
-      },
-    });
-    const milestone = project.milestones[0];
-    if (!milestone) throw new Error("Seeded milestone 2 is missing");
-    const submissionIds = milestone.submissions.map((submission) => submission.id);
-    const decisions = await prisma.milestoneDecision.findMany({
-      where: { submissionId: { in: submissionIds } },
-      select: { id: true },
-    });
-    const decisionIds = decisions.map((decision) => decision.id);
-
-    await prisma.$transaction(async (tx) => {
-      await tx.changeRequest.deleteMany({ where: { decisionId: { in: decisionIds } } });
-      await tx.dispute.deleteMany({ where: { decisionId: { in: decisionIds } } });
-      await tx.milestoneDecision.deleteMany({ where: { id: { in: decisionIds } } });
-      await tx.activityEvent.deleteMany({
-        where: { projectId: project.id, reference: { not: null } },
-      });
-      await tx.outboxEvent.deleteMany({
-        where: { aggregateType: "milestone", aggregateId: milestone.id },
-      });
-      await tx.milestone.update({
-        where: { id: milestone.id },
-        data: { status: "AWAITING_DECISION", completedAt: null },
-      });
-      await tx.project.update({
-        where: { id: project.id },
-        data: { approvedValueMinor: 1_800_000n },
-      });
-    });
+    // This test command only runs against TEST_DATABASE_URL. TRUNCATE bypasses
+    // row triggers without creating a production-role escape hatch.
+    await prisma.$executeRawUnsafe('TRUNCATE TABLE "organizations" RESTART IDENTITY CASCADE');
+    await seedDatabase(prisma);
   });
 
   afterAll(async () => prisma.$disconnect());
@@ -89,7 +48,7 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
     const decision = await app.inject({
       method: "POST",
       url: "/api/v1/projects/cafe-renovation/milestones/40000000-0000-4000-8000-000000000002/decisions",
-      payload: { action: "approve" },
+      payload: { action: "approve", expectedSubmissionId: "60000000-0000-4000-8000-000000000001" },
       headers: { cookie },
     });
     expect(decision.statusCode).toBe(201);
@@ -125,6 +84,7 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
       url: "/api/v1/projects/cafe-renovation/milestones/40000000-0000-4000-8000-000000000002/decisions",
       payload: {
         action: "request-changes",
+        expectedSubmissionId: "60000000-0000-4000-8000-000000000001",
         reason: "Evidence is incomplete",
         comment: "Please upload close-up evidence of the corrected outlet boxes.",
         responseDate: "2026-08-30",
@@ -145,6 +105,7 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
       url: "/api/v1/projects/cafe-renovation/milestones/40000000-0000-4000-8000-000000000002/decisions",
       payload: {
         action: "raise-dispute",
+        expectedSubmissionId: "60000000-0000-4000-8000-000000000001",
         reason: "Layout mismatch",
         explanation:
           "The installed electrical layout differs from the accepted drawing.",
@@ -235,7 +196,6 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
     expect(created.milestones[0]?.acceptanceCriteria).toHaveLength(1);
     expect(created.activityEvents).toMatchObject([{ type: "PROJECT_CREATED" }]);
 
-    const customerParty = created.parties.find((party) => party.role === "CUSTOMER");
     const invitedEmail = `approver-${Date.now()}@example.test`;
     const invitationResponse = await app.inject({
       method: "POST",
@@ -245,7 +205,6 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
     });
     expect(invitationResponse.statusCode).toBe(201);
     const invitationToken = invitationResponse.json().data.token as string;
-    const invitationId = invitationResponse.json().data.invitation.id as string;
     const accepted = await app.inject({
       method: "POST",
       url: "/api/v1/invitations/accept",
@@ -280,30 +239,6 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
       }),
     ).toBe(2);
 
-    const invitedUser = await prisma.user.findUniqueOrThrow({
-      where: { email: invitedEmail },
-    });
-    await prisma.$transaction(async (tx) => {
-      await tx.activityEvent.deleteMany({ where: { projectId: created.id } });
-      await tx.outboxEvent.deleteMany({
-        where: { aggregateType: "invitation", aggregateId: invitationId },
-      });
-      await tx.invitation.deleteMany({ where: { projectId: created.id } });
-      await tx.acceptanceCriterion.deleteMany({
-        where: { milestone: { projectId: created.id } },
-      });
-      await tx.milestone.deleteMany({ where: { projectId: created.id } });
-      await tx.agreementVersion.deleteMany({ where: { projectId: created.id } });
-      await tx.projectParty.deleteMany({ where: { projectId: created.id } });
-      await tx.project.delete({ where: { id: created.id } });
-      await tx.authSession.deleteMany({ where: { userId: invitedUser.id } });
-      await tx.organizationMembership.deleteMany({ where: { userId: invitedUser.id } });
-      await tx.userCredential.deleteMany({ where: { userId: invitedUser.id } });
-      await tx.user.delete({ where: { id: invitedUser.id } });
-      if (customerParty) {
-        await tx.organization.delete({ where: { id: customerParty.organizationId } });
-      }
-    });
     await app.close();
   });
 
@@ -360,26 +295,39 @@ describeDatabase("TrustPay PostgreSQL persistence", () => {
     expect(persisted.acceptances[0]?.reference).toMatch(/^TP-AGR-/);
     expect(persisted.amendmentRequests).toHaveLength(0);
 
-    const invitedUser = await prisma.user.findUniqueOrThrow({ where: { email: invitedEmail } });
-    const customerParty = project.parties.find((party) => party.role === "CUSTOMER");
-    await prisma.$transaction(async (tx) => {
-      await tx.activityEvent.deleteMany({ where: { projectId: project.id } });
-      await tx.outboxEvent.deleteMany({ where: { aggregateId: { in: [agreement.id, invitation.json().data.invitation.id] } } });
-      await tx.idempotencyKey.deleteMany({ where: { userId: invitedUser.id } });
-      await tx.invitation.deleteMany({ where: { projectId: project.id } });
-      await tx.agreementAcceptance.deleteMany({ where: { agreementVersionId: agreement.id } });
-      await tx.acceptanceCriterion.deleteMany({ where: { milestone: { projectId: project.id } } });
-      await tx.milestone.deleteMany({ where: { projectId: project.id } });
-      await tx.agreementVersion.deleteMany({ where: { projectId: project.id } });
-      await tx.projectParty.deleteMany({ where: { projectId: project.id } });
-      await tx.project.delete({ where: { id: project.id } });
-      await tx.authSession.deleteMany({ where: { userId: invitedUser.id } });
-      await tx.organizationMembership.deleteMany({ where: { userId: invitedUser.id } });
-      await tx.userCredential.deleteMany({ where: { userId: invitedUser.id } });
-      await tx.user.delete({ where: { id: invitedUser.id } });
-      if (customerParty) await tx.organization.delete({ where: { id: customerParty.organizationId } });
-    });
     await app.close();
+  });
+
+  it("creates one append-only SME response and a new resubmission version", async () => {
+    const { app: customerApp, cookie: customerCookie } = await authenticatedApp();
+    const milestoneId = "40000000-0000-4000-8000-000000000002";
+    const requested = await customerApp.inject({
+      method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/decisions`, headers: { cookie: customerCookie },
+      payload: { action: "request-changes", expectedSubmissionId: "60000000-0000-4000-8000-000000000001", reason: "Evidence incomplete", comment: "Add a close-up image.", responseDate: "2026-09-20" },
+    });
+    await customerApp.close();
+    expect(requested.statusCode).toBe(201);
+    const changeRequest = await prisma.changeRequest.findFirstOrThrow({ orderBy: { createdAt: "desc" } });
+    const { app: smeApp, cookie: smeCookie } = await authenticatedApp("nadia@example.test");
+    const response = await smeApp.inject({
+      method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/change-requests/${changeRequest.id}/respond`,
+      headers: { cookie: smeCookie, "idempotency-key": "m04-postgres-response-01" }, payload: { response: "The corrected close-up will be included." },
+    });
+    await smeApp.close();
+    expect(response.statusCode).toBe(201);
+    expect(response.json().data).toMatchObject({ submissionNumber: 2, status: "draft", responseToChangeRequest: { changeRequestId: changeRequest.id } });
+    const persisted = await prisma.changeRequestResponse.findUniqueOrThrow({ where: { changeRequestId: changeRequest.id } });
+    expect(persisted.resubmissionId).toBe(response.json().data.id);
+    await expect(prisma.milestoneDecision.update({
+      where: { id: changeRequest.decisionId }, data: { reference: "tampered" },
+    })).rejects.toThrow(/milestone_decisions records are append-only/);
+    await expect(prisma.changeRequest.update({
+      where: { id: changeRequest.id }, data: { comment: "tampered" },
+    })).rejects.toThrow(/change_requests records are append-only/);
+    const event = await prisma.activityEvent.findFirstOrThrow({
+      where: { projectId: changeRequest.projectId }, orderBy: { occurredAt: "desc" },
+    });
+    await expect(prisma.activityEvent.delete({ where: { id: event.id } })).rejects.toThrow(/activity_events records are append-only/);
   });
 
   it("enforces submitted evidence immutability inside PostgreSQL", async () => {

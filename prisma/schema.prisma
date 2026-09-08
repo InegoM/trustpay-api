@@ -104,6 +104,7 @@ enum ActivityType {
   EVIDENCE_SUBMITTED
   MILESTONE_APPROVED
   CHANGES_REQUESTED
+  CHANGE_REQUEST_RESPONDED
   DISPUTE_RECORDED
   DECISION_RECORDED
   VARIATION_APPROVED
@@ -155,6 +156,7 @@ model User {
   submissions                MilestoneSubmission[]
   evidenceUploads            EvidenceItem[]
   decisions                  MilestoneDecision[]
+  changeRequestResponses     ChangeRequestResponse[]
   disputesResolved           Dispute[]                   @relation("DisputeResolver")
   variationsApproved         Variation[]                 @relation("VariationApprover")
   actorEvents                ActivityEvent[]             @relation("ActivityActorUser")
@@ -384,6 +386,7 @@ model AcceptanceCriterion {
   description   String
   milestone     Milestone      @relation(fields: [milestoneId], references: [id], onDelete: Restrict)
   evidenceItems EvidenceItem[]
+  changeRequestReferences ChangeRequestAcceptanceCriterion[]
 
   @@unique([milestoneId, position])
   @@map("acceptance_criteria")
@@ -404,6 +407,7 @@ model MilestoneSubmission {
   submittedBy        User               @relation(fields: [submittedByUserId], references: [id], onDelete: Restrict)
   evidenceItems      EvidenceItem[]
   decision           MilestoneDecision?
+  changeRequestResponse ChangeRequestResponse? @relation("ChangeRequestResubmission")
 
   @@unique([milestoneId, submissionNumber])
   @@index([agreementVersionId])
@@ -430,6 +434,7 @@ model EvidenceItem {
   submission            MilestoneSubmission  @relation(fields: [submissionId], references: [id], onDelete: Restrict)
   acceptanceCriterion   AcceptanceCriterion? @relation(fields: [acceptanceCriterionId], references: [id], onDelete: Restrict)
   uploadedBy            User                 @relation(fields: [uploadedByUserId], references: [id], onDelete: Restrict)
+  changeRequestReferences ChangeRequestEvidenceItem[]
 
   @@index([submissionId])
   @@index([acceptanceCriterionId])
@@ -460,8 +465,48 @@ model ChangeRequest {
   responseDueAt DateTime          @map("response_due_at")
   createdAt     DateTime          @default(now()) @map("created_at")
   decision      MilestoneDecision @relation(fields: [decisionId], references: [id], onDelete: Restrict)
+  response      ChangeRequestResponse?
+  acceptanceCriteria ChangeRequestAcceptanceCriterion[]
+  evidenceItems ChangeRequestEvidenceItem[]
 
   @@map("change_requests")
+}
+
+model ChangeRequestAcceptanceCriterion {
+  changeRequestId String @map("change_request_id") @db.Uuid
+  acceptanceCriterionId String @map("acceptance_criterion_id") @db.Uuid
+  changeRequest ChangeRequest @relation(fields: [changeRequestId], references: [id], onDelete: Restrict)
+  acceptanceCriterion AcceptanceCriterion @relation(fields: [acceptanceCriterionId], references: [id], onDelete: Restrict)
+
+  @@id([changeRequestId, acceptanceCriterionId])
+  @@index([acceptanceCriterionId])
+  @@map("change_request_acceptance_criteria")
+}
+
+model ChangeRequestEvidenceItem {
+  changeRequestId String @map("change_request_id") @db.Uuid
+  evidenceItemId String @map("evidence_item_id") @db.Uuid
+  changeRequest ChangeRequest @relation(fields: [changeRequestId], references: [id], onDelete: Restrict)
+  evidenceItem EvidenceItem @relation(fields: [evidenceItemId], references: [id], onDelete: Restrict)
+
+  @@id([changeRequestId, evidenceItemId])
+  @@index([evidenceItemId])
+  @@map("change_request_evidence_items")
+}
+
+model ChangeRequestResponse {
+  id              String              @id @default(uuid()) @db.Uuid
+  changeRequestId String              @unique @map("change_request_id") @db.Uuid
+  resubmissionId  String              @unique @map("resubmission_id") @db.Uuid
+  respondedByUserId String             @map("responded_by_user_id") @db.Uuid
+  response        String
+  createdAt       DateTime            @default(now()) @map("created_at")
+  changeRequest   ChangeRequest       @relation(fields: [changeRequestId], references: [id], onDelete: Restrict)
+  resubmission    MilestoneSubmission @relation("ChangeRequestResubmission", fields: [resubmissionId], references: [id], onDelete: Restrict)
+  respondedBy     User                @relation(fields: [respondedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([respondedByUserId])
+  @@map("change_request_responses")
 }
 
 model Dispute {

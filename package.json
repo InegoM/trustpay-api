@@ -5,7 +5,10 @@
   "type": "module",
   "packageManager": "npm@10.9.2",
   "overrides": {
-    "deepmerge-ts": "8.0.2"
+    "deepmerge-ts": "8.0.2",
+    "prisma": {
+      "mysql2": "3.24.4"
+    }
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
