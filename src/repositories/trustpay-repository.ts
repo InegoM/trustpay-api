@@ -123,5 +123,6 @@ export interface TrustPayRepository {
     milestoneId: string,
     decision: DecisionInput,
     userId: string,
+    metadata: { requestId?: string },
   ): Promise<DecisionResult>;
 }

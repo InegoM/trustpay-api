@@ -246,9 +246,10 @@ export interface CreatedProjectInvitation {
 }
 
 export type DecisionInput =
-  | { action: "approve" }
+  | { action: "approve"; expectedSubmissionId: string }
   | {
       action: "request-changes";
+      expectedSubmissionId: string;
       reason: string;
       comment: string;
       responseDate: string;
@@ -257,6 +258,7 @@ export type DecisionInput =
     }
   | {
       action: "raise-dispute";
+      expectedSubmissionId: string;
       reason: string;
       explanation: string;
     };

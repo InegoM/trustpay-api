@@ -49,12 +49,6 @@ CREATE INDEX "change_request_evidence_items_evidence_item_id_idx"
 CREATE OR REPLACE FUNCTION trustpay_prevent_change_request_response_mutation()
 RETURNS TRIGGER AS $$
 BEGIN
-  IF current_setting('trustpay.allow_history_cleanup', true) = 'on' THEN
-    IF TG_OP = 'DELETE' THEN
-      RETURN OLD;
-    END IF;
-    RETURN NEW;
-  END IF;
   RAISE EXCEPTION 'change request responses are append-only';
 END;
 $$ LANGUAGE plpgsql;
@@ -64,18 +58,11 @@ BEFORE UPDATE OR DELETE ON "change_request_responses"
 FOR EACH ROW EXECUTE FUNCTION trustpay_prevent_change_request_response_mutation();
 
 -- Decisions, requests, their references, and activity are historical records.
--- The application database role must never rewrite or remove them.  The guarded
--- escape hatch is for isolated test cleanup only; it is set transaction-locally
--- in the PostgreSQL test suite and is not used by application code.
+-- No application role bypass exists. Test fixtures are recreated with TRUNCATE
+-- and reseeded in the dedicated test database rather than deleting history.
 CREATE OR REPLACE FUNCTION trustpay_prevent_historical_record_mutation()
 RETURNS TRIGGER AS $$
 BEGIN
-  IF current_setting('trustpay.allow_history_cleanup', true) = 'on' THEN
-    IF TG_OP = 'DELETE' THEN
-      RETURN OLD;
-    END IF;
-    RETURN NEW;
-  END IF;
   RAISE EXCEPTION '% records are append-only', TG_TABLE_NAME;
 END;
 $$ LANGUAGE plpgsql;

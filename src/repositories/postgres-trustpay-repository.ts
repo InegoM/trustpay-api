@@ -1626,6 +1626,7 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
     milestoneId: string,
     decision: DecisionInput,
     userId: string,
+    metadata: { requestId?: string },
   ): Promise<DecisionResult> {
     return this.prisma.$transaction(
       async (tx) => {
@@ -1668,11 +1669,10 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
         }
         const submission = milestone.submissions[0];
         if (!submission) {
-          throw new DomainError(
-            "The milestone has no submission to decide",
-            409,
-            "MILESTONE_NOT_SUBMITTED",
-          );
+          throw new DomainError("This submission is no longer awaiting a decision", 409, "SUBMISSION_STALE");
+        }
+        if (submission.id !== decision.expectedSubmissionId) {
+          throw new DomainError("This submission is no longer awaiting a decision", 409, "SUBMISSION_STALE");
         }
         if (decision.action === "request-changes") {
           const criterionIds = new Set(milestone.acceptanceCriteria.map((criterion) => criterion.id));
@@ -1759,7 +1759,8 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
               decisionId: dbDecision.id,
               reason: decision.reason,
               comment: decision.comment,
-              responseDueAt: new Date(`${decision.responseDate}T23:59:59.999Z`),
+              // A date-only customer promise is end-of-day Asia/Dubai (UTC+04:00).
+              responseDueAt: new Date(`${decision.responseDate}T19:59:59.999Z`),
               ...(decision.acceptanceCriterionIds?.length
                 ? { acceptanceCriteria: { create: decision.acceptanceCriterionIds.map((acceptanceCriterionId) => ({ acceptanceCriterionId })) } }
                 : {}),
@@ -1791,6 +1792,7 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
             type: eventType,
             description,
             reference,
+            payload: { submissionId: submission.id, action: decision.action, requestId: metadata.requestId, source: "milestone-decision" },
           },
           include: { milestone: true },
         });
@@ -1807,6 +1809,7 @@ export default class PostgresTrustPayRepository implements TrustPayRepository {
                 description:
                   "Customer decision recorded. Payment is handled externally.",
                 reference,
+                payload: { submissionId: submission.id, action: decision.action, requestId: metadata.requestId, source: "milestone-decision" },
               },
               include: { milestone: true },
             }),

@@ -1,5 +1,7 @@
 import "dotenv/config";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import type { PrismaClient } from "../src/generated/prisma/client.js";
 import { createPrismaClient } from "../src/database/prisma.js";
 import { hashPassword } from "../src/auth/password.js";
 
@@ -17,9 +19,7 @@ const ids = {
   invitation: "80000000-0000-4000-8000-000000000001",
 } as const;
 
-const prisma = createPrismaClient();
-
-async function main() {
+export async function seedDatabase(prisma: PrismaClient) {
   const demoPassword = "TrustPayDemo!2026";
   await prisma.organization.upsert({
     where: { id: ids.alba },
@@ -359,6 +359,10 @@ async function main() {
   });
 }
 
-main()
-  .then(() => console.log("TrustPay demo data seeded"))
-  .finally(async () => prisma.$disconnect());
+// Importing this module in the PostgreSQL suite must never seed DATABASE_URL.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  const prisma = createPrismaClient();
+  seedDatabase(prisma)
+    .then(() => console.log("TrustPay demo data seeded"))
+    .finally(async () => prisma.$disconnect());
+}

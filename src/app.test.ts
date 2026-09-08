@@ -98,7 +98,7 @@ describe("TrustPay API", () => {
     const decision = await app.inject({
       method: "POST",
       url: "/api/v1/projects/cafe-renovation/milestones/30000000-0000-4000-8000-000000000002/decisions",
-      payload: { action: "approve" },
+      payload: { action: "approve", expectedSubmissionId: "60000000-0000-4000-8000-000000000001" },
       headers: { cookie },
     });
 
@@ -129,7 +129,7 @@ describe("TrustPay API", () => {
     const request = {
       method: "POST" as const,
       url: "/api/v1/projects/cafe-renovation/milestones/30000000-0000-4000-8000-000000000002/decisions",
-      payload: { action: "approve" },
+      payload: { action: "approve", expectedSubmissionId: "60000000-0000-4000-8000-000000000001" },
       headers: { cookie },
     };
 
@@ -145,7 +145,7 @@ describe("TrustPay API", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/v1/projects/cafe-renovation/milestones/30000000-0000-4000-8000-000000000002/decisions",
-      payload: { action: "raise-dispute", reason: "Layout mismatch", explanation: "short" },
+      payload: { action: "raise-dispute", expectedSubmissionId: "60000000-0000-4000-8000-000000000001", reason: "Layout mismatch", explanation: "short" },
       headers: { cookie },
     });
 
@@ -194,7 +194,7 @@ describe("TrustPay API", () => {
       method: "POST",
       url: "/api/v1/projects/cafe-renovation/milestones/30000000-0000-4000-8000-000000000002/decisions",
       headers: { cookie },
-      payload: { action: "approve" },
+      payload: { action: "approve", expectedSubmissionId: "60000000-0000-4000-8000-000000000001" },
     });
     expect(response.statusCode).toBe(403);
     expect(response.json().error.code).toBe("DECISION_FORBIDDEN");
@@ -221,7 +221,7 @@ describe("TrustPay API", () => {
       method: "POST",
       url: "/api/v1/projects/cafe-renovation/milestones/30000000-0000-4000-8000-000000000002/decisions",
       headers: { cookie },
-      payload: { action: "approve" },
+      payload: { action: "approve", expectedSubmissionId: "60000000-0000-4000-8000-000000000001" },
     });
     expect(milestoneDecision.statusCode).toBe(404);
     expect(milestoneDecision.json().error.code).toBe("PROJECT_NOT_FOUND");
@@ -234,7 +234,7 @@ describe("TrustPay API", () => {
       method: "POST",
       url: "/api/v1/projects/cafe-renovation/milestones/2/decisions",
       headers: { cookie },
-      payload: { action: "approve" },
+      payload: { action: "approve", expectedSubmissionId: "60000000-0000-4000-8000-000000000001" },
     });
     expect(response.statusCode).toBe(400);
     expect(response.json().error.code).toBe("VALIDATION_ERROR");
@@ -715,7 +715,7 @@ describe("TrustPay API", () => {
     expect((await app.inject({ method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${firstId}/submit`, headers: { cookie: smeCookie, "idempotency-key": "m04-first-submit-0001" } })).statusCode).toBe(201);
     const requested = await app.inject({
       method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/decisions`, headers: { cookie: customerCookie },
-      payload: { action: "request-changes", reason: "Finishes", comment: "Replace the incomplete finish photographs.", responseDate: "2026-09-15", evidenceItemIds: [uploaded.json().data.id] },
+      payload: { action: "request-changes", expectedSubmissionId: firstId, reason: "Finishes", comment: "Replace the incomplete finish photographs.", responseDate: "2026-09-15", evidenceItemIds: [uploaded.json().data.id] },
     });
     expect(requested.statusCode).toBe(201);
     const history = await app.inject({ method: "GET", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/change-requests`, headers: { cookie: customerCookie } });
@@ -737,7 +737,10 @@ describe("TrustPay API", () => {
     const secondFile = multipartEvidence({}, { name: "after.png", type: "image/png", body: onePixelPng });
     expect((await app.inject({ method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${secondId}/evidence`, headers: { cookie: smeCookie, "content-type": secondFile.contentType }, payload: secondFile.payload })).statusCode).toBe(201);
     expect((await app.inject({ method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions/${secondId}/submit`, headers: { cookie: smeCookie, "idempotency-key": "m04-second-submit-01" } })).statusCode).toBe(201);
-    const approved = await app.inject({ method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/decisions`, headers: { cookie: customerCookie }, payload: { action: "approve" } });
+    const delayedOldDecision = await app.inject({ method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/decisions`, headers: { cookie: customerCookie }, payload: { action: "approve", expectedSubmissionId: firstId } });
+    expect(delayedOldDecision.statusCode).toBe(409);
+    expect(delayedOldDecision.json().error.code).toBe("SUBMISSION_STALE");
+    const approved = await app.inject({ method: "POST", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/decisions`, headers: { cookie: customerCookie }, payload: { action: "approve", expectedSubmissionId: secondId } });
     expect(approved.statusCode).toBe(201);
     const submissions = await app.inject({ method: "GET", url: `/api/v1/projects/cafe-renovation/milestones/${milestoneId}/submissions`, headers: { cookie: customerCookie } });
     expect(submissions.json().data).toHaveLength(2);

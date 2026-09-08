@@ -116,7 +116,27 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
   private readonly idempotentAgreementDecisions = new Map<string, { requestHash: string; result: AgreementDecisionResult }>();
   private readonly idempotentSubmissions = new Map<string, MilestoneSubmissionRecord>();
   private readonly idempotentChangeRequestResponses = new Map<string, MilestoneSubmissionRecord>();
-  private readonly submissions = new Map<string, MilestoneSubmissionRecord[]>();
+  private readonly submissions = new Map<string, MilestoneSubmissionRecord[]>([
+    [
+      "30000000-0000-4000-8000-000000000002",
+      [{
+        id: "60000000-0000-4000-8000-000000000001",
+        projectId: seedProject.id,
+        milestoneId: "30000000-0000-4000-8000-000000000002",
+        milestoneSequenceNumber: 2,
+        milestoneName: "Structural and electrical work",
+        submissionNumber: 1,
+        status: "submitted",
+        createdAt: "2026-08-20T05:25:00.000Z",
+        submittedAt: "2026-08-20T05:25:00.000Z",
+        submittedBy: "Nadia Rahman",
+        agreementVersionId: "50000000-0000-4000-8000-000000000001",
+        agreementVersion: "v1.2",
+        evidence: [],
+        canEdit: false,
+      }],
+    ],
+  ]);
   private readonly evidenceStorageKeys = new Map<string, string>();
 
   async createCustomerInvitation(
@@ -637,6 +657,7 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
     milestoneId: string,
     decision: DecisionInput,
     userId: string,
+    _metadata: { requestId?: string },
   ): Promise<DecisionResult> {
     const project = this.projects.get(projectId);
     if (!this.allowedUsers.has(userId) || !project) {
@@ -667,6 +688,13 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
         "MILESTONE_NOT_DECIDABLE",
       );
     }
+    const submittedPackages = (this.submissions.get(milestone.id) ?? [])
+      .filter((item) => item.status === "submitted")
+      .sort((left, right) => right.submissionNumber - left.submissionNumber);
+    const submitted = submittedPackages[0];
+    if (!submitted || submitted.id !== decision.expectedSubmissionId) {
+      throw new DomainError("This submission is no longer awaiting a decision", 409, "SUBMISSION_STALE");
+    }
 
     const occurredAt = new Date().toISOString();
     const decisionReference = reference(projectId, milestone.sequenceNumber);
@@ -674,6 +702,7 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
       project,
       milestone,
       decision,
+      submitted,
       occurredAt,
       decisionReference,
     );
@@ -686,6 +715,7 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
     project: Project,
     milestone: Milestone,
     decision: DecisionInput,
+    submitted: MilestoneSubmissionRecord,
     occurredAt: string,
     decisionReference: string,
   ): ActivityEvent[] {
@@ -727,15 +757,12 @@ export default class InMemoryTrustPayRepository implements TrustPayRepository {
 
     if (decision.action === "request-changes") {
       milestone.status = "changes-requested";
-      const submission = (this.submissions.get(milestone.id) ?? []).filter((item) => item.status === "submitted").sort((a, b) => b.submissionNumber - a.submissionNumber)[0];
-      if (submission) {
-        submission.decision = { id: randomUUID(), action: "request-changes", decidedBy: project.authorizedApprover, decidedAt: occurredAt, reference: decisionReference };
-        submission.changeRequest = {
+      submitted.decision = { id: randomUUID(), action: "request-changes", decidedBy: project.authorizedApprover, decidedAt: occurredAt, reference: decisionReference };
+      submitted.changeRequest = {
           id: randomUUID(), reasonCategory: decision.reason, reason: decision.reason, requiredChanges: decision.comment, comment: decision.comment, responseDueAt: `${decision.responseDate}T23:59:59.999Z`,
           requestedBy: project.authorizedApprover, requestedAt: occurredAt, decisionReference,
           acceptanceCriterionIds: [...new Set(decision.acceptanceCriterionIds ?? [])], evidenceItemIds: [...new Set(decision.evidenceItemIds ?? [])],
-        };
-      }
+      };
       return [
         {
           ...base,

@@ -27,10 +27,11 @@ const createAgreementVersionBody = z.object({
   terms: z.string().trim().min(20).max(10_000),
 }).strict();
 const decisionBody = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("approve") }).strict(),
+  z.object({ action: z.literal("approve"), expectedSubmissionId: z.uuid() }).strict(),
   z
     .object({
       action: z.literal("request-changes"),
+      expectedSubmissionId: z.uuid(),
       reason: z.string().trim().min(3).max(200),
       comment: z.string().trim().min(5).max(2_000),
       responseDate: z.iso.date(),
@@ -41,6 +42,7 @@ const decisionBody = z.discriminatedUnion("action", [
   z
     .object({
       action: z.literal("raise-dispute"),
+      expectedSubmissionId: z.uuid(),
       reason: z.string().trim().min(3).max(200),
       explanation: z.string().trim().min(10).max(4_000),
     })
@@ -446,6 +448,7 @@ export function trustPayRoutes(
               }
             : body.data,
           user.id,
+          { requestId: request.id },
         );
         return reply.code(201).send({ data: result });
       },
